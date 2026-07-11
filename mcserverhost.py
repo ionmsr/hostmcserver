@@ -195,7 +195,7 @@ if __name__ == "__main__":
 
 # ── Phase 2: GUI imports (tkinter guaranteed installed) ─────
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
+from tkinter import ttk, scrolledtext, messagebox, filedialog
 import threading
 import json
 import urllib.request
@@ -209,10 +209,11 @@ import zipfile
 import datetime
 import socket
 import hashlib
+import tarfile
 
 # ── Constants ───────────────────────────────────────────────
 APP_NAME = "MCServerHost"
-VERSION = "1.2.0"
+VERSION = "2.0.0"
 SERVER_DIR = Path.home() / "MCServerHost"
 PAPER_JAR = SERVER_DIR / "paper.jar"
 VANILLA_JAR = SERVER_DIR / "server.jar"
@@ -231,6 +232,7 @@ FORGE_MAVEN = "https://maven.minecraftforge.net"
 PROFILES_DIR = SERVER_DIR / "profiles"
 FABRIC_JAR = SERVER_DIR / "fabric-server.jar"
 FORGE_JAR = SERVER_DIR / "forge-server.jar"
+INSTANCES_DIR = SERVER_DIR / "servers"
 
 BG_DARK = "#1a1a2e"
 BG_MID = "#22223a"
@@ -286,6 +288,13 @@ DEFAULT_CONFIG = {
     "log_export": False,
     "backup_max_age_days": 0,
     "backup_max_count": 0,
+    "resource_pack": "",
+    "resource_pack_sha1": "",
+    "resource_pack_prompt": "",
+    "require_resource_pack": False,
+    "notifications_enabled": True,
+    "cloud_backup_enabled": False,
+    "cloud_backup_remote": "",
 }
 
 SERVER_PRESETS = {
@@ -598,11 +607,11 @@ def generate_server_properties(config):
         "max-world-size": "29999984",
         "prevent-proxy-connections": "false",
         "server-location": "",
-        "require-resource-pack": "false",
-        "resource-pack-prompt": "",
+        "require-resource-pack": str(config.get("require_resource_pack", False)).lower(),
+        "resource-pack-prompt": config.get("resource_pack_prompt", ""),
         "resource-pack-id": "",
-        "resource-pack": "",
-        "resource-pack-sha1": "",
+        "resource-pack": config.get("resource_pack", ""),
+        "resource-pack-sha1": config.get("resource_pack_sha1", ""),
         "resource-pack-server-overlay": "false",
         "debug": "false",
         "sync-chunk-writes": "true",
@@ -675,6 +684,12 @@ class MCServerHost:
         self._log_queue = []
         self._log_lock = threading.Lock()
         self._players_lock = threading.Lock()
+        self.active_instance = "default"
+        self._perf_ram_history = []
+        self._perf_tps_history = []
+        self._perf_player_history = []
+        self._perf_start_time = None
+        self._perf_stats_id = None
 
         self.config = self._load_config()
         self._setup_styles()
@@ -684,20 +699,297 @@ class MCServerHost:
         self.root.after(300, self._refresh_bans)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    def _get_instance_dir(self, name):
+        if name == "default":
+            return SERVER_DIR
+        return INSTANCES_DIR / name
+
+    def _server_dir(self):
+        return self._get_instance_dir(self.active_instance)
+
     def _load_config(self):
         cfg = DEFAULT_CONFIG.copy()
         if CONFIG_FILE.exists():
             try:
                 with open(CONFIG_FILE) as f:
+                    main_cfg = json.load(f)
+                self.active_instance = main_cfg.get("active_instance", "default")
+                if self.active_instance == "default":
+                    cfg.update(main_cfg)
+            except Exception:
+                pass
+        inst_dir = self._get_instance_dir(self.active_instance)
+        inst_cfg = inst_dir / "config.json"
+        if inst_cfg.exists() and self.active_instance != "default":
+            try:
+                with open(inst_cfg) as f:
                     cfg.update(json.load(f))
             except Exception:
                 pass
+        cfg["active_instance"] = self.active_instance
         return cfg
 
     def _save_config(self):
-        SERVER_DIR.mkdir(parents=True, exist_ok=True)
-        with open(CONFIG_FILE, "w") as f:
+        sd = self._server_dir()
+        sd.mkdir(parents=True, exist_ok=True)
+        if self.active_instance == "default":
+            cfg_file = CONFIG_FILE
+        else:
+            cfg_file = sd / "config.json"
+        with open(cfg_file, "w") as f:
             json.dump(self.config, f, indent=2)
+        if self.active_instance != "default":
+            main_cfg = {}
+            if CONFIG_FILE.exists():
+                try:
+                    with open(CONFIG_FILE) as f:
+                        main_cfg = json.load(f)
+                except Exception:
+                    pass
+            main_cfg["active_instance"] = self.active_instance
+            SERVER_DIR.mkdir(parents=True, exist_ok=True)
+            with open(CONFIG_FILE, "w") as f:
+                json.dump(main_cfg, f, indent=2)
+
+    def _build_instance_selector(self):
+        self.instance_var = tk.StringVar(value=self.active_instance)
+        self.instance_combo = ttk.Combobox(
+            self.hdr_instance_frame, textvariable=self.instance_var,
+            state="readonly", width=18, values=self._get_instance_names()
+        )
+        self.instance_combo.pack(side=tk.LEFT, padx=(8, 0))
+        self.instance_combo.bind("<<ComboboxSelected>>", lambda e: self._switch_instance(self.instance_var.get()))
+        ttk.Button(self.hdr_instance_frame, text="+", width=3,
+                   command=self._create_instance).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(self.hdr_instance_frame, text="-", width=3,
+                   command=self._delete_instance).pack(side=tk.LEFT, padx=(2, 0))
+
+    def _get_instance_names(self):
+        names = ["default"]
+        if INSTANCES_DIR.exists():
+            for d in sorted(INSTANCES_DIR.iterdir()):
+                if d.is_dir() and d.name not in names:
+                    names.append(d.name)
+        return names
+
+    def _refresh_instance_list(self):
+        self.instance_combo["values"] = self._get_instance_names()
+
+    def _switch_instance(self, name):
+        if name == self.active_instance:
+            return
+        if self.running:
+            messagebox.showwarning("Server Running", "Stop the server before switching instances.")
+            self.instance_var.set(self.active_instance)
+            return
+        self._save_config()
+        self._cancel_all_timers()
+        self._stop_resource_monitor()
+        self.active_instance = name
+        self.config = self._load_config()
+        self._save_config()
+        self._apply_config_to_ui()
+        self._refresh_config_list()
+        self._refresh_players()
+        self._refresh_bans()
+        self._check_server_installed()
+        self._log(f"Switched to instance: {name}", "success")
+
+    def _create_instance(self):
+        from tkinter import simpledialog
+        name = simpledialog.askstring("New Instance", "Instance name:", parent=self.root)
+        if not name:
+            return
+        name = re.sub(r'[^a-zA-Z0-9_-]', '', name.strip())
+        if not name or name == "default":
+            messagebox.showwarning("Invalid Name", "Enter a valid instance name (alphanumeric, _, -).")
+            return
+        if (INSTANCES_DIR / name).exists():
+            messagebox.showwarning("Exists", f"Instance '{name}' already exists.")
+            return
+        INSTANCES_DIR.mkdir(parents=True, exist_ok=True)
+        inst_dir = INSTANCES_DIR / name
+        inst_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            if CONFIG_FILE.exists():
+                shutil.copy2(str(CONFIG_FILE), str(inst_dir / "config.json"))
+        except Exception:
+            pass
+        self.active_instance = name
+        self.config = self._load_config()
+        self._save_config()
+        self.instance_combo["values"] = self._get_instance_names()
+        self.instance_var.set(name)
+        self._apply_config_to_ui()
+        self._log(f"Created instance: {name}", "success")
+
+    def _delete_instance(self):
+        if self.active_instance == "default":
+            messagebox.showwarning("Cannot Delete", "Cannot delete the default instance.")
+            return
+        name = self.active_instance
+        if not messagebox.askyesno("Delete Instance",
+                                   f"Delete instance '{name}'?\nAll data in this instance will be permanently removed."):
+            return
+        inst_dir = INSTANCES_DIR / name
+        if inst_dir.exists():
+            try:
+                shutil.rmtree(str(inst_dir))
+            except Exception as e:
+                self._log(f"Failed to delete instance: {e}", "error")
+                return
+        self.active_instance = "default"
+        self.config = self._load_config()
+        self._save_config()
+        self.instance_combo["values"] = self._get_instance_names()
+        self.instance_var.set("default")
+        self._apply_config_to_ui()
+        self._refresh_config_list()
+        self._refresh_players()
+        self._refresh_bans()
+        self._log(f"Deleted instance: {name}", "success")
+
+    def _check_rclone(self):
+        try:
+            r = subprocess.run(["rclone", "version"], capture_output=True, text=True, timeout=10)
+            return r.returncode == 0
+        except Exception:
+            return False
+
+    def _cloud_backup(self):
+        remote = self.cloud_remote_var.get().strip()
+        if not remote:
+            messagebox.showwarning("No Remote", "Enter an rclone remote path (e.g., gdrive:MCServerHost/backups).")
+            return
+        sd = self._server_dir()
+        backups_dir = sd / "backups"
+        if not backups_dir.exists():
+            messagebox.showwarning("No Backups", "No local backups found to sync.")
+            return
+        self.cloud_status.configure(text="Syncing to cloud...")
+        self.cloud_sync_btn.configure(state="disabled")
+
+        def _do():
+            try:
+                r = subprocess.run(
+                    ["rclone", "sync", str(backups_dir), remote],
+                    capture_output=True, text=True, timeout=600
+                )
+                if r.returncode == 0:
+                    self._log("Cloud backup sync complete", "success")
+                    self.root.after(0, lambda: self.cloud_status.configure(text="Sync complete!"))
+                else:
+                    err = r.stderr.strip()[:200] if r.stderr else "Unknown error"
+                    self._log(f"Cloud sync failed: {err}", "error")
+                    self.root.after(0, lambda: self.cloud_status.configure(text="Sync failed"))
+            except Exception as e:
+                self._log(f"Cloud sync error: {e}", "error")
+                self.root.after(0, lambda: self.cloud_status.configure(text="Sync failed"))
+            self.root.after(0, lambda: self.cloud_sync_btn.configure(state="normal"))
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _build_cloud_backup_section(self, parent):
+        cloud_frame = ttk.Frame(parent)
+        cloud_frame.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(cloud_frame, text="Cloud Backup", style="SubHeader.TLabel").pack(anchor="w", pady=(0, 4))
+        has_rclone = self._check_rclone()
+        if has_rclone:
+            cr_row = ttk.Frame(cloud_frame)
+            cr_row.pack(fill=tk.X)
+            ttk.Label(cr_row, text="Remote:", style="Dim.TLabel").pack(side=tk.LEFT)
+            self.cloud_remote_var = tk.StringVar(value=self.config.get("cloud_backup_remote", ""))
+            ttk.Entry(cr_row, textvariable=self.cloud_remote_var, width=40).pack(side=tk.LEFT, padx=(4, 8))
+            self.cloud_sync_btn = ttk.Button(cr_row, text="Sync Backups to Cloud", style="Blue.TButton",
+                                              command=self._cloud_backup)
+            self.cloud_sync_btn.pack(side=tk.LEFT)
+            self.cloud_status = ttk.Label(cr_row, text="", style="Dim.TLabel")
+            self.cloud_status.pack(side=tk.LEFT, padx=8)
+        else:
+            ttk.Label(cloud_frame,
+                      text="rclone not found. Install it: curl https://rclone.org/install.sh | sudo bash",
+                      style="Err.TLabel", wraplength=600).pack(anchor="w")
+
+    def _migrate_server(self):
+        sd = self._server_dir()
+        if not sd.exists():
+            messagebox.showwarning("No Server", "Server directory not found.")
+            return
+        ts = datetime.datetime.now().strftime("%Y-%m-%d")
+        default_name = f"MCServerHost_{self.active_instance}_{ts}.tar.gz"
+        save_path = filedialog.asksaveasfilename(
+            defaultextension=".tar.gz",
+            filetypes=[("Gzip tar files", "*.tar.gz"), ("All files", "*.*")],
+            initialfile=default_name,
+            title="Save Server Package As"
+        )
+        if not save_path:
+            return
+        self.migrate_status.configure(text="Packaging server...")
+        self.migrate_btn.configure(state="disabled")
+
+        exclude_prefixes = ("logs/", "cache/", "crash-reports/", "__pycache__/")
+        exclude_suffixes = (".tmp",)
+        exclude_globs = ("playit*",)
+
+        def _do():
+            try:
+                with tarfile.open(save_path, "w:gz") as tar:
+                    for item in sd.iterdir():
+                        rel = item.name
+                        if any(rel.startswith(p.rstrip("/")) or rel == p.rstrip("/") for p in exclude_prefixes):
+                            continue
+                        if any(rel.endswith(s) for s in exclude_suffixes):
+                            continue
+                        if any(re.match(g.replace("*", ".*"), rel) for g in exclude_globs):
+                            continue
+                        tar.add(str(item), arcname=item.name)
+                self._log(f"Server packaged to {save_path}", "success")
+                self.root.after(0, lambda: self.migrate_status.configure(text="Done!"))
+            except Exception as e:
+                self._log(f"Package failed: {e}", "error")
+                self.root.after(0, lambda: self.migrate_status.configure(text="Failed"))
+            self.root.after(0, lambda: self.migrate_btn.configure(state="normal"))
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _import_server(self):
+        tar_path = filedialog.askopenfilename(
+            filetypes=[("Gzip tar files", "*.tar.gz"), ("All files", "*.*")],
+            title="Select Server Archive"
+        )
+        if not tar_path:
+            return
+        from tkinter import simpledialog
+        name = simpledialog.askstring("Import Server", "Instance name for imported server:", parent=self.root)
+        if not name:
+            return
+        name = re.sub(r'[^a-zA-Z0-9_-]', '', name.strip())
+        if not name or name == "default":
+            messagebox.showwarning("Invalid Name", "Enter a valid instance name.")
+            return
+        if (INSTANCES_DIR / name).exists():
+            messagebox.showwarning("Exists", f"Instance '{name}' already exists.")
+            return
+        INSTANCES_DIR.mkdir(parents=True, exist_ok=True)
+        inst_dir = INSTANCES_DIR / name
+        inst_dir.mkdir(parents=True, exist_ok=True)
+        self.migrate_status.configure(text="Importing server...")
+        self.migrate_import_btn.configure(state="disabled")
+
+        def _do():
+            try:
+                with tarfile.open(tar_path, "r:gz") as tar:
+                    tar.extractall(str(inst_dir))
+                self._log(f"Server imported to instance '{name}'", "success")
+                self.root.after(0, lambda: self.migrate_status.configure(text="Import complete!"))
+                self.root.after(0, lambda: self._refresh_instance_list())
+            except Exception as e:
+                self._log(f"Import failed: {e}", "error")
+                self.root.after(0, lambda: self.migrate_status.configure(text="Import failed"))
+            self.root.after(0, lambda: self.migrate_import_btn.configure(state="normal"))
+
+        threading.Thread(target=_do, daemon=True).start()
 
     def _setup_styles(self):
         s = ttk.Style()
@@ -782,6 +1074,9 @@ class MCServerHost:
         hdr = ttk.Frame(main)
         hdr.pack(fill=tk.X, pady=(0, 10))
         ttk.Label(hdr, text=APP_NAME, style="Header.TLabel").pack(side=tk.LEFT)
+        self.hdr_instance_frame = ttk.Frame(hdr)
+        self.hdr_instance_frame.pack(side=tk.LEFT, padx=(10, 0))
+        self._build_instance_selector()
         self.res_lbl = ttk.Label(hdr, text="", style="Dim.TLabel")
         self.res_lbl.pack(side=tk.LEFT, padx=14)
         self.status_lbl = ttk.Label(hdr, text="  Offline", style="Off.TLabel")
@@ -792,9 +1087,12 @@ class MCServerHost:
         self._build_server_tab()
         self._build_console_tab()
         self._build_plugins_tab()
+        self._build_mods_tab()
         self._build_players_tab()
         self._build_bans_tab()
         self._build_network_tab()
+        self._build_configs_tab()
+        self._build_stats_tab()
 
     # ── Setup Tab ───────────────────────────────────────────
     def _build_setup_tab(self):
@@ -936,6 +1234,13 @@ class MCServerHost:
                     textvariable=self.restart_delay_var).pack(side=tk.LEFT)
         ttk.Label(restart_row, text="sec", style="Dim.TLabel").pack(side=tk.LEFT, padx=(2, 0))
 
+        notif_row = ttk.Frame(top)
+        notif_row.pack(fill=tk.X, pady=(4, 0))
+        self.notifications_var = tk.BooleanVar(value=self.config.get("notifications_enabled", True))
+        ttk.Checkbutton(notif_row, text="Desktop notifications",
+                        variable=self.notifications_var,
+                        command=self._on_notifications_toggle).pack(side=tk.LEFT)
+
         players_row = ttk.Frame(top)
         players_row.pack(fill=tk.X, pady=(6, 0))
         ttk.Label(players_row, text="Online Players:", style="Dim.TLabel").pack(side=tk.LEFT)
@@ -985,6 +1290,23 @@ class MCServerHost:
         self._cfg_vars["hardcore"] = _field(col2, "Hardcore:", "hardcore", values=["true", "false"])
 
         ttk.Separator(scroll_inner, orient="horizontal").pack(fill=tk.X, padx=14, pady=10)
+        rp_header = ttk.Frame(scroll_inner)
+        rp_header.pack(fill=tk.X, padx=14, pady=(0, 8))
+        ttk.Label(rp_header, text="Resource Pack", style="SubHeader.TLabel").pack(anchor="w")
+
+        rp_frame = ttk.Frame(scroll_inner)
+        rp_frame.pack(fill=tk.X, padx=14, pady=(0, 10))
+        rp_col1 = ttk.Frame(rp_frame)
+        rp_col1.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 12))
+        rp_col2 = ttk.Frame(rp_frame)
+        rp_col2.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(12, 0))
+
+        self._cfg_vars["resource_pack"] = _field(rp_col1, "Pack URL:", "resource_pack", width=30)
+        self._cfg_vars["resource_pack_sha1"] = _field(rp_col2, "SHA1 Hash:", "resource_pack_sha1", width=30)
+        self._cfg_vars["resource_pack_prompt"] = _field(rp_col1, "Prompt Message:", "resource_pack_prompt", width=26)
+        self._cfg_vars["require_resource_pack"] = _field(rp_col2, "Require Pack:", "require_resource_pack", values=["true", "false"])
+
+        ttk.Separator(scroll_inner, orient="horizontal").pack(fill=tk.X, padx=14, pady=10)
         tools = ttk.Frame(scroll_inner)
         tools.pack(fill=tk.X, padx=14, pady=(0, 10))
 
@@ -998,6 +1320,10 @@ class MCServerHost:
                         variable=self.auto_backup_var).pack(side=tk.LEFT)
         ttk.Button(bk_row, text="Backup Now", command=self._manual_backup_world).pack(side=tk.LEFT, padx=8)
         ttk.Button(bk_row, text="Restore Latest Backup", command=self._restore_world).pack(side=tk.LEFT)
+        ttk.Button(bk_row, text="Download World", style="Blue.TButton",
+                   command=self._download_world).pack(side=tk.LEFT, padx=8)
+        self.world_download_status = ttk.Label(bk_row, text="", style="Dim.TLabel")
+        self.world_download_status.pack(side=tk.LEFT, padx=8)
         self.backup_status = ttk.Label(bk_row, text="", style="Dim.TLabel")
         self.backup_status.pack(side=tk.LEFT, padx=8)
 
@@ -1062,6 +1388,24 @@ class MCServerHost:
         self.pbackup_status = ttk.Label(pbackup_row, text="", style="Dim.TLabel")
         self.pbackup_status.pack(side=tk.LEFT, padx=8)
 
+        ttk.Separator(tools, orient="horizontal").pack(fill=tk.X, pady=6)
+        self._build_cloud_backup_section(tools)
+
+        ttk.Separator(tools, orient="horizontal").pack(fill=tk.X, pady=6)
+        migrate_frame = ttk.Frame(tools)
+        migrate_frame.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(migrate_frame, text="Migrate Server", style="SubHeader.TLabel").pack(anchor="w", pady=(0, 4))
+        mig_row = ttk.Frame(migrate_frame)
+        mig_row.pack(fill=tk.X)
+        self.migrate_btn = ttk.Button(mig_row, text="Package Server", style="Blue.TButton",
+                                       command=self._migrate_server)
+        self.migrate_btn.pack(side=tk.LEFT)
+        self.migrate_import_btn = ttk.Button(mig_row, text="Import Server",
+                                              command=self._import_server)
+        self.migrate_import_btn.pack(side=tk.LEFT, padx=8)
+        self.migrate_status = ttk.Label(mig_row, text="", style="Dim.TLabel")
+        self.migrate_status.pack(side=tk.LEFT, padx=8)
+
     # ── Console Tab ──────────────────────────────────────────
     def _build_console_tab(self):
         tab = ttk.Frame(self.notebook)
@@ -1081,16 +1425,35 @@ class MCServerHost:
             selectbackground=BG_HOVER, selectforeground=FG_BRIGHT,
             padx=10, pady=6, spacing1=1
         )
-        self.console.pack(fill=tk.BOTH, expand=True, padx=14, pady=10)
+        self.console.pack(fill=tk.BOTH, expand=True, padx=14, pady=(10, 0))
         self.console.tag_config("info", foreground=FG_MAIN)
         self.console.tag_config("warn", foreground=FG_YELLOW)
         self.console.tag_config("error", foreground=FG_RED)
         self.console.tag_config("success", foreground=FG_GREEN)
         self.console.tag_config("cmd", foreground=FG_ACCENT)
 
+        ttk.Separator(tab, orient="horizontal").pack(fill=tk.X, padx=14, pady=4)
+
+        chat_label = ttk.Frame(tab)
+        chat_label.pack(fill=tk.X, padx=14)
+        ttk.Label(chat_label, text="Player Chat", style="Dim.TLabel",
+                  font=("Segoe UI", 9, "bold")).pack(anchor="w")
+
+        self.chat_panel = scrolledtext.ScrolledText(
+            tab, wrap=tk.WORD, bg="#12122a", fg=FG_MAIN, insertbackground=FG_ACCENT,
+            font=("Cascadia Code", 10), relief=tk.FLAT, borderwidth=0, state="disabled",
+            selectbackground=BG_HOVER, selectforeground=FG_BRIGHT,
+            padx=10, pady=6, spacing1=1, height=8
+        )
+        self.chat_panel.pack(fill=tk.BOTH, expand=False, padx=14, pady=(2, 10))
+        self.chat_panel.tag_config("chat_player", foreground=FG_ACCENT, font=("Cascadia Code", 10, "bold"))
+        self.chat_panel.tag_config("chat_msg", foreground=FG_MAIN)
+        self.chat_panel.tag_config("chat_server", foreground=FG_YELLOW)
+
         clear_row = ttk.Frame(tab)
         clear_row.pack(fill=tk.X, padx=14, pady=(0, 10))
         ttk.Button(clear_row, text="Clear Console", command=self._clear_console).pack(side=tk.LEFT)
+        ttk.Button(clear_row, text="Clear Chat", command=self._clear_chat).pack(side=tk.LEFT, padx=8)
         ttk.Button(clear_row, text="Analyze Crash Reports", command=self._analyze_crash_reports).pack(side=tk.LEFT, padx=8)
         self.log_export_var = tk.BooleanVar(value=self.config.get("log_export", False))
         ttk.Checkbutton(clear_row, text="Export logs to file",
@@ -1103,6 +1466,31 @@ class MCServerHost:
         self.console.configure(state="normal")
         self.console.delete("1.0", tk.END)
         self.console.configure(state="disabled")
+
+    def _clear_chat(self):
+        self.chat_panel.configure(state="normal")
+        self.chat_panel.delete("1.0", tk.END)
+        self.chat_panel.configure(state="disabled")
+
+    def _parse_chat_message(self, line):
+        m = re.search(r'<(\w+)>\s*(.*)', line)
+        if m:
+            return m.group(1), m.group(2)
+        m2 = re.search(r'\[Server\]\s*<(\w+)>\s*(.*)', line)
+        if m2:
+            return m2.group(1), m2.group(2)
+        return None, None
+
+    def _display_chat(self, player, message):
+        def _do():
+            self.chat_panel.configure(state="normal")
+            ts = time.strftime("%H:%M:%S")
+            self.chat_panel.insert(tk.END, f"[{ts}] ", "chat_server")
+            self.chat_panel.insert(tk.END, f"<{player}> ", "chat_player")
+            self.chat_panel.insert(tk.END, f"{message}\n", "chat_msg")
+            self.chat_panel.see(tk.END)
+            self.chat_panel.configure(state="disabled")
+        self.root.after(0, _do)
 
     # ── Plugins Tab ──────────────────────────────────────────
     def _build_plugins_tab(self):
@@ -1242,7 +1630,7 @@ class MCServerHost:
                     return
                 dl_url = files[0].get("url")
                 fname = files[0].get("filename", "plugin.jar")
-                plugins_dir = SERVER_DIR / "plugins"
+                plugins_dir = self._server_dir() / "plugins"
                 plugins_dir.mkdir(parents=True, exist_ok=True)
                 dest = str(plugins_dir / fname)
                 ok = download_file(dl_url, dest)
@@ -1257,7 +1645,7 @@ class MCServerHost:
         threading.Thread(target=_do, daemon=True).start()
 
     def _open_plugins_folder(self):
-        plugins_dir = SERVER_DIR / "plugins"
+        plugins_dir = self._server_dir() / "plugins"
         plugins_dir.mkdir(parents=True, exist_ok=True)
         if sys.platform == "win32":
             os.startfile(str(plugins_dir))
@@ -1265,6 +1653,179 @@ class MCServerHost:
             subprocess.run(["open", str(plugins_dir)])
         else:
             subprocess.run(["xdg-open", str(plugins_dir)])
+
+    # ── Mods Tab ──────────────────────────────────────────────
+    def _build_mods_tab(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="  Mods  ")
+        scroll_inner = self._scrollable_frame(tab)
+        frm = ttk.Frame(scroll_inner)
+        frm.pack(fill=tk.BOTH, expand=True, padx=14, pady=12)
+
+        self.mods_info_label = ttk.Label(frm, text="Mod Manager (Modrinth)", style="SubHeader.TLabel")
+        self.mods_info_label.pack(anchor="w")
+        self.mods_desc_label = ttk.Label(frm, text="Search and install mods for Fabric/Forge servers.",
+                                         style="Dim.TLabel")
+        self.mods_desc_label.pack(anchor="w", pady=(0, 8))
+
+        self.mods_not_supported_label = ttk.Label(
+            frm, text="Mod browser is only available for Fabric and Forge server types.",
+            style="Dim.TLabel")
+
+        self.mods_search_row = ttk.Frame(frm)
+        self.mod_search_var = tk.StringVar()
+        ttk.Entry(self.mods_search_row, textvariable=self.mod_search_var, width=40).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(self.mods_search_row, text="Search", style="Blue.TButton",
+                   command=self._search_mods).pack(side=tk.LEFT)
+        self.mod_search_btn = self.mods_search_row.winfo_children()[-1]
+        self.mod_status = ttk.Label(self.mods_search_row, text="", style="Dim.TLabel")
+        self.mod_status.pack(side=tk.LEFT, padx=10)
+
+        self.mods_list_frame = ttk.Frame(frm)
+        self.mods_list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+
+        cols = ("Name", "Downloads", "Description")
+        self.mod_tree = ttk.Treeview(self.mods_list_frame, columns=cols, show="headings", selectmode="browse")
+        self.mod_tree.heading("Name", text="Name")
+        self.mod_tree.heading("Downloads", text="Downloads")
+        self.mod_tree.heading("Description", text="Description")
+        self.mod_tree.column("Name", width=180, minwidth=120)
+        self.mod_tree.column("Downloads", width=90, minwidth=70, anchor="e")
+        self.mod_tree.column("Description", width=400, minwidth=200)
+        scrollbar = ttk.Scrollbar(self.mods_list_frame, orient="vertical", command=self.mod_tree.yview)
+        self.mod_tree.configure(yscrollcommand=scrollbar.set)
+        self.mod_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(4, 0))
+
+        self.mod_tree.tag_configure("odd", background=BG_ENTRY)
+        self.mod_tree.tag_configure("even", background=BG_MID)
+
+        btn_row = ttk.Frame(frm)
+        btn_row.pack(fill=tk.X)
+        ttk.Button(btn_row, text="Install Selected", style="Green.TButton",
+                   command=self._install_mod).pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="Open Mods Folder",
+                   command=self._open_mods_folder).pack(side=tk.LEFT, padx=8)
+        self.mod_install_status = ttk.Label(btn_row, text="", style="Dim.TLabel")
+        self.mod_install_status.pack(side=tk.LEFT, padx=8)
+
+        self._mod_results = []
+
+    def _search_mods(self):
+        stype = self.config.get("server_type", "paper")
+        if stype not in ("fabric", "forge"):
+            self.mod_not_supported_ui()
+            return
+        query = self.mod_search_var.get().strip()
+        if not query:
+            return
+        mc_ver = self.config.get("mc_version", "")
+        self.mod_status.configure(text="Searching...")
+        self.mod_search_btn.configure(state="disabled")
+
+        def _do():
+            facets = [["project_type:mod"]]
+            if stype == "fabric":
+                facets.append(["categories:fabric"])
+            elif stype == "forge":
+                facets.append(["categories:forge"])
+            facets_str = json.dumps(facets)
+            url = f"{MODRINTH_API}/search?facets={urllib.parse.quote(facets_str)}&query={urllib.parse.quote(query)}&limit=20"
+            if mc_ver:
+                url += f"&game_versions={urllib.parse.quote(f'[{json.dumps(mc_ver)}]')}"
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = json.loads(resp.read())
+                hits = data.get("hits", [])
+                self._mod_results = hits
+                self.root.after(0, lambda: self._populate_mod_results(hits))
+            except Exception as e:
+                self.root.after(0, lambda: self.mod_status.configure(text=f"Search failed: {e}"))
+            self.root.after(0, lambda: self.mod_search_btn.configure(state="normal"))
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _populate_mod_results(self, hits):
+        for item in self.mod_tree.get_children():
+            self.mod_tree.delete(item)
+        if not hits:
+            self.mod_status.configure(text="No results found")
+            return
+        for i, h in enumerate(hits):
+            name = h.get("title", "?")
+            dl = h.get("downloads", 0)
+            desc = (h.get("description") or "")[:80]
+            tag = "even" if i % 2 == 0 else "odd"
+            self.mod_tree.insert("", "end", values=(name, f"{dl:,}", desc), tags=(tag,))
+        self.mod_status.configure(text=f"{len(hits)} results")
+
+    def _install_mod(self):
+        sel = self.mod_tree.selection()
+        if not sel:
+            messagebox.showinfo("No Selection", "Select a mod to install.")
+            return
+        idx = self.mod_tree.index(sel[0])
+        if idx >= len(self._mod_results):
+            return
+        mod = self._mod_results[idx]
+        project_id = mod.get("project_id") or mod.get("slug")
+        mod_name = mod.get("title", "mod")
+        mc_ver = self.config.get("mc_version", "")
+        stype = self.config.get("server_type", "fabric")
+        loaders = ["fabric"] if stype == "fabric" else ["forge", "neoforge"]
+
+        self.mod_install_status.configure(text=f"Installing {mod_name}...")
+
+        def _do():
+            url = f"{MODRINTH_API}/project/{project_id}/version"
+            params = []
+            if mc_ver:
+                params.append(f"game_versions=[{json.dumps(mc_ver)}]")
+            if loaders:
+                params.append(f"loaders=[{json.dumps(loaders[0])}]")
+            if params:
+                url += "?" + "&".join(params)
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    versions = json.loads(resp.read())
+                if not versions:
+                    self.root.after(0, lambda: self.mod_install_status.configure(text="No compatible version found"))
+                    return
+                ver = versions[0]
+                files = ver.get("files", [])
+                if not files:
+                    self.root.after(0, lambda: self.mod_install_status.configure(text="No download file found"))
+                    return
+                dl_url = files[0].get("url")
+                fname = files[0].get("filename", "mod.jar")
+                mods_dir = self._server_dir() / "mods"
+                mods_dir.mkdir(parents=True, exist_ok=True)
+                dest = str(mods_dir / fname)
+                ok = download_file(dl_url, dest)
+                if ok:
+                    self.root.after(0, lambda: self.mod_install_status.configure(text=f"Installed {mod_name}"))
+                    self._log(f"Mod installed: {mod_name}", "success")
+                else:
+                    self.root.after(0, lambda: self.mod_install_status.configure(text="Download failed"))
+            except Exception as e:
+                self.root.after(0, lambda: self.mod_install_status.configure(text=f"Error: {e}"))
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _open_mods_folder(self):
+        mods_dir = self._server_dir() / "mods"
+        mods_dir.mkdir(parents=True, exist_ok=True)
+        if sys.platform == "win32":
+            os.startfile(str(mods_dir))
+        elif sys.platform == "darwin":
+            subprocess.run(["open", str(mods_dir)])
+        else:
+            subprocess.run(["xdg-open", str(mods_dir)])
+
+    def mod_not_supported_ui(self):
+        self.mod_status.configure(text="Mod browser requires Fabric or Forge server type")
 
     # ── Players Tab (Whitelist / OP) ────────────────────────
     def _build_players_tab(self):
@@ -1328,7 +1889,7 @@ class MCServerHost:
         self.op_tree.tag_configure("even", background=BG_MID)
 
     def _refresh_players(self):
-        wl_file = SERVER_DIR / "whitelist.json"
+        wl_file = self._server_dir() / "whitelist.json"
         wl_names = []
         if wl_file.exists():
             try:
@@ -1343,7 +1904,7 @@ class MCServerHost:
             tag = "even" if i % 2 == 0 else "odd"
             self.wl_tree.insert("", "end", values=(name,), tags=(tag,))
 
-        ops_file = SERVER_DIR / "ops.json"
+        ops_file = self._server_dir() / "ops.json"
         ops_entries = []
         if ops_file.exists():
             try:
@@ -1439,7 +2000,7 @@ class MCServerHost:
         self.iban_tree.tag_configure("even", background=BG_MID)
 
     def _refresh_bans(self):
-        bans_file = SERVER_DIR / "bans.json"
+        bans_file = self._server_dir() / "bans.json"
         pban_entries = []
         if bans_file.exists():
             try:
@@ -1455,7 +2016,7 @@ class MCServerHost:
             tag = "even" if i % 2 == 0 else "odd"
             self.pban_tree.insert("", "end", values=(name, reason, date), tags=(tag,))
 
-        ibans_file = SERVER_DIR / "ip-bans.json"
+        ibans_file = self._server_dir() / "ip-bans.json"
         iban_entries = []
         if ibans_file.exists():
             try:
@@ -1541,6 +2102,146 @@ class MCServerHost:
                    command=self._check_port_accessibility).pack(side=tk.LEFT)
         self.port_check_status = ttk.Label(port_row, text="", style="Dim.TLabel")
         self.port_check_status.pack(side=tk.LEFT, padx=8)
+
+    # ── Stats Tab ─────────────────────────────────────────
+    def _build_stats_tab(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="  Stats  ")
+        frm = ttk.Frame(tab)
+        frm.pack(fill=tk.BOTH, expand=True, padx=14, pady=12)
+
+        ttk.Label(frm, text="Performance Dashboard", style="SubHeader.TLabel").pack(anchor="w")
+
+        cards_row = ttk.Frame(frm)
+        cards_row.pack(fill=tk.X, pady=(8, 10))
+
+        self._stat_cards = {}
+        for key, label in [("ram", "Current RAM"), ("tps", "Current TPS"),
+                           ("uptime", "Uptime"), ("players", "Players"), ("status", "Status")]:
+            card = ttk.Frame(cards_row, style="Card.TFrame")
+            card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+            lbl = ttk.Label(card, text=label, style="CardDim.TLabel",
+                            font=("Segoe UI", 9))
+            lbl.pack(anchor="w", padx=10, pady=(8, 0))
+            val = ttk.Label(card, text="--", style="Card.TLabel",
+                            font=("Segoe UI", 14, "bold"))
+            val.pack(anchor="w", padx=10, pady=(0, 8))
+            self._stat_cards[key] = val
+
+        ttk.Label(frm, text="RAM Usage Over Time", style="Dim.TLabel",
+                  font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(6, 2))
+        self._ram_canvas = tk.Canvas(frm, bg=BG_ENTRY, highlightthickness=0, height=160)
+        self._ram_canvas.pack(fill=tk.X, pady=(0, 6))
+
+        ttk.Label(frm, text="TPS Over Time", style="Dim.TLabel",
+                  font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(6, 2))
+        self._tps_canvas = tk.Canvas(frm, bg=BG_ENTRY, highlightthickness=0, height=160)
+        self._tps_canvas.pack(fill=tk.X)
+
+    def _update_stats_display(self):
+        if not self.running:
+            return
+        with self._players_lock:
+            pcount = len(self.online_players)
+        self._stat_cards["players"].configure(text=str(pcount))
+        self._stat_cards["status"].configure(
+            text="Ready" if self.server_ready else "Starting",
+            foreground=FG_GREEN if self.server_ready else FG_YELLOW
+        )
+        if self._perf_start_time:
+            elapsed = time.time() - self._perf_start_time
+            h, rem = divmod(int(elapsed), 3600)
+            m, s = divmod(rem, 60)
+            self._stat_cards["uptime"].configure(text=f"{h}h {m}m {s}s")
+        if self._perf_ram_history:
+            self._stat_cards["ram"].configure(text=f"{self._perf_ram_history[-1][1]:.0f} MB")
+        if self._perf_tps_history:
+            tps = self._perf_tps_history[-1][1]
+            color = FG_GREEN if tps >= 18 else (FG_YELLOW if tps >= 15 else FG_RED)
+            self._stat_cards["tps"].configure(text=f"{tps:.1f}", foreground=color)
+        self._draw_ram_graph()
+        self._draw_tps_graph()
+
+    def _draw_ram_graph(self):
+        c = self._ram_canvas
+        c.delete("all")
+        w = c.winfo_width()
+        h = c.winfo_height()
+        if w < 50 or h < 50:
+            return
+        pad_l, pad_r, pad_t, pad_b = 50, 10, 10, 25
+        gw = w - pad_l - pad_r
+        gh = h - pad_t - pad_b
+        data = self._perf_ram_history[-60:]
+        if not data:
+            c.create_text(w // 2, h // 2, text="Waiting for data...", fill=FG_DIM, font=("Segoe UI", 10))
+            return
+        max_y = max(v for _, v in data) * 1.15 or 100
+        c.create_line(pad_l, pad_t, pad_l, pad_t + gh, fill=FG_DIM, width=1)
+        c.create_line(pad_l, pad_t + gh, pad_l + gw, pad_t + gh, fill=FG_DIM, width=1)
+        for i in range(5):
+            y = pad_t + gh - (gh * i / 4)
+            val = max_y * i / 4
+            c.create_line(pad_l - 4, y, pad_l, y, fill=FG_DIM)
+            c.create_text(pad_l - 6, y, text=f"{val:.0f}", anchor="e", fill=FG_DIM, font=("Segoe UI", 8))
+            c.create_line(pad_l, y, pad_l + gw, y, fill="#2a2a44", dash=(2, 4))
+        n = len(data)
+        if n == 1:
+            x = pad_l + gw // 2
+            y = pad_t + gh - (data[0][1] / max_y * gh)
+            c.create_oval(x - 2, y - 2, x + 2, y + 2, fill=FG_ACCENT, outline="")
+        else:
+            coords = []
+            for i, (_, val) in enumerate(data):
+                x = pad_l + (gw * i / (n - 1))
+                y = pad_t + gh - (val / max_y * gh)
+                coords.extend([x, y])
+            c.create_line(*coords, fill=FG_ACCENT, width=2, smooth=True)
+        c.create_text(pad_l + gw // 2, pad_t + gh + 16, text="Time", fill=FG_DIM, font=("Segoe UI", 8))
+
+    def _draw_tps_graph(self):
+        c = self._tps_canvas
+        c.delete("all")
+        w = c.winfo_width()
+        h = c.winfo_height()
+        if w < 50 or h < 50:
+            return
+        pad_l, pad_r, pad_t, pad_b = 50, 10, 10, 25
+        gw = w - pad_l - pad_r
+        gh = h - pad_t - pad_b
+        data = self._perf_tps_history[-60:]
+        if not data:
+            c.create_text(w // 2, h // 2, text="Waiting for data...", fill=FG_DIM, font=("Segoe UI", 10))
+            return
+        max_y = 20.0
+        c.create_line(pad_l, pad_t, pad_l, pad_t + gh, fill=FG_DIM, width=1)
+        c.create_line(pad_l, pad_t + gh, pad_l + gw, pad_t + gh, fill=FG_DIM, width=1)
+        y_green = pad_t + gh - (18 / max_y * gh)
+        y_yellow = pad_t + gh - (15 / max_y * gh)
+        c.create_rectangle(pad_l, pad_t, pad_l + gw, y_green, fill="#0d2818", outline="")
+        c.create_rectangle(pad_l, y_green, pad_l + gw, y_yellow, fill="#2a2000", outline="")
+        c.create_rectangle(pad_l, y_yellow, pad_l + gw, pad_t + gh, fill="#2a0d0d", outline="")
+        for val, label in [(20, "20"), (18, "18"), (15, "15"), (10, "10"), (5, "5"), (0, "0")]:
+            y = pad_t + gh - (val / max_y * gh)
+            c.create_line(pad_l - 4, y, pad_l, y, fill=FG_DIM)
+            c.create_text(pad_l - 6, y, text=label, anchor="e", fill=FG_DIM, font=("Segoe UI", 8))
+            c.create_line(pad_l, y, pad_l + gw, y, fill="#2a2a44", dash=(2, 4))
+        n = len(data)
+        if n == 1:
+            x = pad_l + gw // 2
+            val = data[0][1]
+            y = pad_t + gh - (val / max_y * gh)
+            color = FG_GREEN if val >= 18 else (FG_YELLOW if val >= 15 else FG_RED)
+            c.create_oval(x - 2, y - 2, x + 2, y + 2, fill=color, outline="")
+        else:
+            for i in range(n - 1):
+                x1 = pad_l + (gw * i / (n - 1))
+                y1 = pad_t + gh - (data[i][1] / max_y * gh)
+                x2 = pad_l + (gw * (i + 1) / (n - 1))
+                y2 = pad_t + gh - (data[i + 1][1] / max_y * gh)
+                color = FG_GREEN if data[i + 1][1] >= 18 else (FG_YELLOW if data[i + 1][1] >= 15 else FG_RED)
+                c.create_line(x1, y1, x2, y2, fill=color, width=2)
+        c.create_text(pad_l + gw // 2, pad_t + gh + 16, text="Time", fill=FG_DIM, font=("Segoe UI", 8))
 
     # ── Helpers ─────────────────────────────────────────────
     def _scrollable_frame(self, parent):
@@ -1637,14 +2338,17 @@ class MCServerHost:
             self.root.after(0, lambda: self._set_card(self.java_card, f"Java: MISSING - {hint}", False))
         self.java_ok = java_ver is not None and java_ver >= 17
 
-        jar_map = {"paper": PAPER_JAR, "vanilla": VANILLA_JAR, "fabric": FABRIC_JAR, "forge": FORGE_JAR}
-        jar = jar_map.get(stype, PAPER_JAR)
+        sd = self._server_dir()
+        jar_map = {"paper": sd / "paper.jar", "vanilla": sd / "server.jar",
+                   "fabric": sd / "fabric-server.jar", "forge": sd / "forge-server.jar"}
+        jar = jar_map.get(stype, sd / "paper.jar")
         exists = jar.exists()
         label = f"{stype.title()}: Downloaded" if exists else f"{stype.title()}: Not downloaded"
         self.root.after(0, lambda: self._set_card(self.paper_card, label, exists))
         self.paper_ready = exists
 
-        if PLAYIT_BIN.exists():
+        playit_path = sd / ("playit.exe" if sys.platform == "win32" else "playit")
+        if playit_path.exists():
             self.root.after(0, lambda: self._set_card(self.playit_card, "playit.gg: Downloaded", True))
             self.playit_ready = True
         else:
@@ -1727,8 +2431,10 @@ class MCServerHost:
 
     def _check_server_installed(self):
         stype = self.server_type_var.get()
-        jar_map = {"paper": PAPER_JAR, "vanilla": VANILLA_JAR, "fabric": FABRIC_JAR, "forge": FORGE_JAR}
-        jar = jar_map.get(stype, PAPER_JAR)
+        sd = self._server_dir()
+        jar_map = {"paper": sd / "paper.jar", "vanilla": sd / "server.jar",
+                   "fabric": sd / "fabric-server.jar", "forge": sd / "forge-server.jar"}
+        jar = jar_map.get(stype, sd / "paper.jar")
         exists = jar.exists()
         label = f"{stype.title()}: Downloaded" if exists else f"{stype.title()}: Not downloaded"
         self.root.after(0, lambda: self._set_card(self.paper_card, label, exists))
@@ -1750,13 +2456,14 @@ class MCServerHost:
         threading.Thread(target=self._do_download, args=(ver, stype), daemon=True).start()
 
     def _do_download(self, version, stype):
+        sd = self._server_dir()
         if stype == "paper":
             url, build_id, fname = get_paper_build_url(version)
             if not url:
                 self._schedule_ui(lambda: self.dl_btn.configure(state="normal"))
                 self._log("No stable Paper build found for this version", "error")
                 return
-            dest = str(PAPER_JAR)
+            dest = str(sd / "paper.jar")
             label = f"Paper {version} build {build_id}"
         elif stype == "fabric":
             url, fname = get_fabric_server_url(version)
@@ -1764,7 +2471,7 @@ class MCServerHost:
                 self._schedule_ui(lambda: self.dl_btn.configure(state="normal"))
                 self._log(f"No Fabric server found for {version}", "error")
                 return
-            dest = str(FABRIC_JAR)
+            dest = str(sd / "fabric-server.jar")
             label = f"Fabric {version}"
         elif stype == "forge":
             url, fname, label_text = get_forge_server_url(version)
@@ -1772,8 +2479,8 @@ class MCServerHost:
                 self._schedule_ui(lambda: self.dl_btn.configure(state="normal"))
                 self._log(f"No Forge installer found for {version}", "error")
                 return
-            installer_dest = str(SERVER_DIR / "forge-installer.jar")
-            SERVER_DIR.mkdir(parents=True, exist_ok=True)
+            installer_dest = str(sd / "forge-installer.jar")
+            sd.mkdir(parents=True, exist_ok=True)
             self._schedule_ui(
                 lambda: self.dl_status.configure(text=f"Downloading {fname}..."),
                 lambda: self.dl_progress.configure(value=0),
@@ -1793,20 +2500,20 @@ class MCServerHost:
                 try:
                     r = subprocess.run(
                         ["java", "-jar", installer_dest, "--installServer"],
-                        cwd=str(SERVER_DIR), capture_output=True, text=True, timeout=600
+                        cwd=str(sd), capture_output=True, text=True, timeout=600
                     )
                     if r.returncode == 0:
                         forge_jar = None
-                        for f in SERVER_DIR.glob("forge-*server*.jar"):
+                        for f in sd.glob("forge-*server*.jar"):
                             forge_jar = f
                             break
                         if not forge_jar:
-                            for f in SERVER_DIR.glob("forge-*.jar"):
+                            for f in sd.glob("forge-*.jar"):
                                 if "installer" not in f.name:
                                     forge_jar = f
                                     break
                         if forge_jar:
-                            shutil.copy2(str(forge_jar), str(FORGE_JAR))
+                            shutil.copy2(str(forge_jar), str(sd / "forge-server.jar"))
                             self.config["mc_version"] = version
                             self.config["server_type"] = stype
                             self._save_config()
@@ -1850,11 +2557,11 @@ class MCServerHost:
                 self.root.after(0, lambda: self._log(f"No vanilla server found for {version}", "error"))
                 self.root.after(0, lambda: self.dl_btn.configure(state="normal"))
                 return
-            dest = str(VANILLA_JAR)
+            dest = str(sd / "server.jar")
             fname = "server.jar"
             label = f"Vanilla {version}"
 
-        SERVER_DIR.mkdir(parents=True, exist_ok=True)
+        sd.mkdir(parents=True, exist_ok=True)
         self.root.after(0, lambda: self.dl_status.configure(text=f"Downloading {fname}..."))
         self.root.after(0, lambda: self.dl_progress.configure(value=0))
 
@@ -1897,14 +2604,15 @@ class MCServerHost:
         self._set_card(self.playit_card, "playit.gg: Downloading...", True)
 
         def _do():
-            ok = download_file(url, str(PLAYIT_BIN))
+            playit_bin = self._server_dir() / ("playit.exe" if sys.platform == "win32" else "playit")
+            ok = download_file(url, str(playit_bin))
             if ok:
                 sha_url = url + ".sha256"
                 try:
                     req = urllib.request.Request(sha_url, headers={"User-Agent": USER_AGENT})
                     with urllib.request.urlopen(req, timeout=30) as resp:
                         expected = resp.read().decode().strip().split()[0]
-                    h = hashlib.sha256(PLAYIT_BIN.read_bytes()).hexdigest()
+                    h = hashlib.sha256(playit_bin.read_bytes()).hexdigest()
                     if h != expected:
                         self.root.after(0, lambda: self._log(
                             "playit.gg hash mismatch - download may be corrupted", "error"))
@@ -1914,7 +2622,7 @@ class MCServerHost:
                 except Exception:
                     pass
                 if sys.platform != "win32":
-                    os.chmod(str(PLAYIT_BIN), 0o755)
+                    os.chmod(str(playit_bin), 0o755)
                 self.playit_ready = True
                 self.root.after(0, lambda: self._set_card(self.playit_card, "playit.gg: Downloaded", True))
                 self.root.after(0, lambda: self._log("playit.gg agent downloaded", "success"))
@@ -1930,8 +2638,10 @@ class MCServerHost:
         if self.running:
             return
         stype = self.config.get("server_type", "paper")
-        jar_map = {"paper": PAPER_JAR, "vanilla": VANILLA_JAR, "fabric": FABRIC_JAR, "forge": FORGE_JAR}
-        jar = jar_map.get(stype, PAPER_JAR)
+        sd = self._server_dir()
+        jar_map = {"paper": sd / "paper.jar", "vanilla": sd / "server.jar",
+                   "fabric": sd / "fabric-server.jar", "forge": sd / "forge-server.jar"}
+        jar = jar_map.get(stype, sd / "paper.jar")
         if not jar.exists():
             messagebox.showwarning("Not Ready", f"Download the server first (Setup tab).")
             self.notebook.select(0)
@@ -1946,8 +2656,9 @@ class MCServerHost:
         self._save_server_config()
         self._write_eula()
 
-        SERVER_DIR.mkdir(parents=True, exist_ok=True)
-        PROPS_FILE.write_text(generate_server_properties(self.config))
+        sd = self._server_dir()
+        sd.mkdir(parents=True, exist_ok=True)
+        (sd / "server.properties").write_text(generate_server_properties(self.config))
 
         self.console.configure(state="normal")
         self.console.delete("1.0", tk.END)
@@ -1968,12 +2679,16 @@ class MCServerHost:
 
         try:
             self.server_process = subprocess.Popen(
-                cmd, cwd=str(SERVER_DIR), stdin=subprocess.PIPE,
+                cmd, cwd=str(self._server_dir()), stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
             )
             self.running = True
             self.server_ready = False
             self.stopped_manually = False
+            self._perf_ram_history = []
+            self._perf_tps_history = []
+            self._perf_player_history = []
+            self._perf_start_time = time.time()
             with self._players_lock:
                 self.online_players.clear()
             self.root.after(0, self._update_players_display)
@@ -1981,6 +2696,7 @@ class MCServerHost:
             self.root.after(0, lambda: self.stop_btn.configure(state="normal"))
             self.root.after(0, lambda: self._set_status("Starting...", True))
             threading.Thread(target=self._read_server_output, daemon=True).start()
+            self._send_notification("MCServerHost", "Server Started")
             self._start_resource_monitor()
             if self.sched_restart_var.get():
                 self.root.after(2000, self._start_scheduled_restart_timer)
@@ -1995,6 +2711,26 @@ class MCServerHost:
             self.stop_btn.configure(state="disabled")
             self._set_status("Offline", False)
             self.running = False
+
+    def _parse_tps(self, line):
+        m = re.search(r'Ticks per second:\s*([\d.]+)', line)
+        if m:
+            self._perf_tps_history.append((time.time(), min(float(m.group(1)), 20.0)))
+            if len(self._perf_tps_history) > 60:
+                self._perf_tps_history = self._perf_tps_history[-60:]
+            return
+        m = re.search(r'Average:\s*([\d.]+)\s*tick', line)
+        if m:
+            avg = float(m.group(1))
+            tps = min(20.0, 20.0 / avg) if avg > 0 else 20.0
+            self._perf_tps_history.append((time.time(), tps))
+            if len(self._perf_tps_history) > 60:
+                self._perf_tps_history = self._perf_tps_history[-60:]
+            return
+        if "Can't keep up" in line:
+            self._perf_tps_history.append((time.time(), 10.0))
+            if len(self._perf_tps_history) > 60:
+                self._perf_tps_history = self._perf_tps_history[-60:]
 
     def _read_server_output(self):
         proc = self.server_process
@@ -2015,6 +2751,7 @@ class MCServerHost:
                     tag = "success"
                     self.server_ready = True
                 self._parse_player_event(line)
+                self._parse_tps(line)
                 self._log(line, tag)
         except (ValueError, OSError):
             pass
@@ -2043,6 +2780,7 @@ class MCServerHost:
         self._stop_playit()
         self._stop_resource_monitor()
         if not self.stopped_manually:
+            self._send_notification("MCServerHost", "Server Stopped")
             self._analyze_crash_reports()
 
     CRASH_PATTERNS = [
@@ -2062,7 +2800,7 @@ class MCServerHost:
     ]
 
     def _analyze_crash_reports(self):
-        crash_dir = SERVER_DIR / "crash-reports"
+        crash_dir = self._server_dir() / "crash-reports"
         if not crash_dir.exists():
             return
         crash_files = sorted(crash_dir.glob("crash-*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -2130,7 +2868,8 @@ class MCServerHost:
         self._log("Starting playit.gg agent...")
         try:
             self.playit_process = subprocess.Popen(
-                [str(PLAYIT_BIN)], cwd=str(SERVER_DIR), stdout=subprocess.PIPE,
+                [str(self._server_dir() / ("playit.exe" if sys.platform == "win32" else "playit"))],
+                cwd=str(self._server_dir()), stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, bufsize=1,
             )
             threading.Thread(target=self._read_playit_output, daemon=True).start()
@@ -2186,7 +2925,7 @@ class MCServerHost:
 
     # ── Config Save ─────────────────────────────────────────
     def _save_server_config(self):
-        BOOL_KEYS = {"online_mode", "pvp", "white_list", "hardcore"}
+        BOOL_KEYS = {"online_mode", "pvp", "white_list", "hardcore", "require_resource_pack"}
         for key, var in self._cfg_vars.items():
             val = var.get()
             if key in BOOL_KEYS:
@@ -2257,11 +2996,16 @@ class MCServerHost:
             with self._players_lock:
                 self.online_players.add(player)
             self.root.after(0, self._update_players_display)
+            self._notify_player_join(player)
         elif leave_match:
             player = leave_match.group(1)
             with self._players_lock:
                 self.online_players.discard(player)
             self.root.after(0, self._update_players_display)
+            self._notify_player_leave(player)
+        player, message = self._parse_chat_message(line)
+        if player is not None:
+            self._display_chat(player, message)
 
     def _update_players_display(self):
         with self._players_lock:
@@ -2272,16 +3016,18 @@ class MCServerHost:
             self.players_lbl.configure(text="None")
 
     def _auto_backup_world(self):
-        world_dir = SERVER_DIR / self.config.get("level_name", "world")
+        sd = self._server_dir()
+        world_dir = sd / self.config.get("level_name", "world")
         if not world_dir.exists():
             return
         threading.Thread(target=self._do_backup_world, daemon=True).start()
 
     def _do_backup_world(self):
-        world_dir = SERVER_DIR / self.config.get("level_name", "world")
+        sd = self._server_dir()
+        world_dir = sd / self.config.get("level_name", "world")
         if not world_dir.exists():
             return
-        backups_dir = SERVER_DIR / "backups"
+        backups_dir = sd / "backups"
         backups_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         zip_name = backups_dir / f"world_backup_{ts}.zip"
@@ -2299,7 +3045,7 @@ class MCServerHost:
             self._log(f"Backup failed: {e}", "error")
 
     def _rotate_backups(self):
-        backups_dir = SERVER_DIR / "backups"
+        backups_dir = self._server_dir() / "backups"
         if not backups_dir.exists():
             return
         backups = sorted(backups_dir.glob("world_backup_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
@@ -2330,7 +3076,7 @@ class MCServerHost:
         self._auto_backup_world()
 
     def _restore_world(self):
-        backups_dir = SERVER_DIR / "backups"
+        backups_dir = self._server_dir() / "backups"
         if not backups_dir.exists():
             messagebox.showinfo("No Backups", "No backups found.")
             return
@@ -2347,7 +3093,7 @@ class MCServerHost:
                                    f"Restore from {latest.name}?\nCurrent world will be replaced."):
             return
         world_name = self.config.get("level_name", "world")
-        world_dir = SERVER_DIR / world_name
+        world_dir = self._server_dir() / world_name
         try:
             if world_dir.exists():
                 shutil.rmtree(str(world_dir))
@@ -2362,7 +3108,7 @@ class MCServerHost:
         name = self.wl_player_var.get().strip()
         if not name:
             return
-        wl_file = SERVER_DIR / "whitelist.json"
+        wl_file = self._server_dir() / "whitelist.json"
         wl = []
         if wl_file.exists():
             try:
@@ -2384,7 +3130,7 @@ class MCServerHost:
         name = self.wl_player_var.get().strip()
         if not name:
             return
-        wl_file = SERVER_DIR / "whitelist.json"
+        wl_file = self._server_dir() / "whitelist.json"
         if not wl_file.exists():
             self.root.after(0, lambda: self.wl_status.configure(text="No whitelist file"))
             return
@@ -2404,7 +3150,7 @@ class MCServerHost:
         name = self.wl_player_var.get().strip()
         if not name:
             return
-        ops_file = SERVER_DIR / "ops.json"
+        ops_file = self._server_dir() / "ops.json"
         ops = []
         if ops_file.exists():
             try:
@@ -2426,7 +3172,7 @@ class MCServerHost:
         name = self.wl_player_var.get().strip()
         if not name:
             return
-        ops_file = SERVER_DIR / "ops.json"
+        ops_file = self._server_dir() / "ops.json"
         if not ops_file.exists():
             self.root.after(0, lambda: self.wl_status.configure(text="No ops file"))
             return
@@ -2582,33 +3328,34 @@ class MCServerHost:
             return
 
         def _do():
+            sd = self._server_dir()
             if stype == "paper":
                 url, build_id, fname = get_paper_build_url(ver)
                 if not url:
                     self._log("No stable Paper build found", "error")
                     return
-                dest = str(PAPER_JAR)
+                dest = str(sd / "paper.jar")
                 label = f"Paper {ver} build {build_id}"
             elif stype == "fabric":
                 url, fname = get_fabric_server_url(ver)
                 if not url:
                     self._log(f"No Fabric server found for {ver}", "error")
                     return
-                dest = str(FABRIC_JAR)
+                dest = str(sd / "fabric-server.jar")
                 label = f"Fabric {ver}"
             elif stype == "forge":
                 url, fname, _ = get_forge_server_url(ver)
                 if not url:
                     self._log(f"No Forge installer found for {ver}", "error")
                     return
-                dest = str(FORGE_JAR)
+                dest = str(sd / "forge-server.jar")
                 label = f"Forge {ver}"
             else:
                 url = get_vanilla_download_url(ver)
                 if not url:
                     self._log(f"No vanilla server found for {ver}", "error")
                     return
-                dest = str(VANILLA_JAR)
+                dest = str(sd / "server.jar")
                 label = f"Vanilla {ver}"
             if os.path.exists(dest):
                 shutil.copy2(dest, dest + ".old")
@@ -2723,7 +3470,7 @@ class MCServerHost:
         name = self.ban_player_var.get().strip()
         if not name:
             return
-        bans_file = SERVER_DIR / "bans.json"
+        bans_file = self._server_dir() / "bans.json"
         bans = []
         if bans_file.exists():
             try:
@@ -2747,7 +3494,7 @@ class MCServerHost:
         name = self.ban_player_var.get().strip()
         if not name:
             return
-        bans_file = SERVER_DIR / "bans.json"
+        bans_file = self._server_dir() / "bans.json"
         if not bans_file.exists():
             self.root.after(0, lambda: self.ban_status.configure(text="No bans file"))
             return
@@ -2772,7 +3519,7 @@ class MCServerHost:
         ip = self.ban_ip_var.get().strip()
         if not ip:
             return
-        bans_file = SERVER_DIR / "ip-bans.json"
+        bans_file = self._server_dir() / "ip-bans.json"
         bans = []
         if bans_file.exists():
             try:
@@ -2796,7 +3543,7 @@ class MCServerHost:
         ip = self.ban_ip_var.get().strip()
         if not ip:
             return
-        bans_file = SERVER_DIR / "ip-bans.json"
+        bans_file = self._server_dir() / "ip-bans.json"
         if not bans_file.exists():
             self.root.after(0, lambda: self.ban_ip_status.configure(text="No IP bans file"))
             return
@@ -2827,7 +3574,7 @@ class MCServerHost:
             self._close_log_file()
 
     def _open_log_file(self):
-        logs_dir = SERVER_DIR / "logs"
+        logs_dir = self._server_dir() / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.datetime.now().strftime("%Y-%m-%d")
         log_path = logs_dir / f"server_{ts}.log"
@@ -2878,8 +3625,17 @@ class MCServerHost:
         if ram_mb is not None:
             text = f"RAM: {ram_mb:.0f} MB"
             self.root.after(0, lambda t=text: self.res_lbl.configure(text=t))
+            self._perf_ram_history.append((time.time(), ram_mb))
+            if len(self._perf_ram_history) > 60:
+                self._perf_ram_history = self._perf_ram_history[-60:]
         else:
             self.root.after(0, lambda: self.res_lbl.configure(text=""))
+        with self._players_lock:
+            pcount = len(self.online_players)
+        self._perf_player_history.append((time.time(), pcount))
+        if len(self._perf_player_history) > 60:
+            self._perf_player_history = self._perf_player_history[-60:]
+        self.root.after(0, self._update_stats_display)
         self.resource_monitor_id = self.root.after(3000, self._update_resource_display)
 
     def _get_server_ram(self):
@@ -2918,8 +3674,8 @@ class MCServerHost:
         name = self.profile_var.get().strip()
         if not name:
             return
-        PROFILES_DIR.mkdir(parents=True, exist_ok=True)
-        profile_path = PROFILES_DIR / f"{name}.json"
+        self._server_dir().mkdir(parents=True, exist_ok=True)
+        profile_path = self._server_dir() / "profiles" / f"{name}.json"
         profile = self.config.copy()
         with open(profile_path, "w") as f:
             json.dump(profile, f, indent=2)
@@ -2930,7 +3686,7 @@ class MCServerHost:
         name = self.profile_var.get().strip()
         if not name:
             return
-        profile_path = PROFILES_DIR / f"{name}.json"
+        profile_path = self._server_dir() / "profiles" / f"{name}.json"
         if not profile_path.exists():
             self.root.after(0, lambda: self.profile_status.configure(text=f"Profile '{name}' not found"))
             return
@@ -2949,7 +3705,7 @@ class MCServerHost:
         name = self.profile_var.get().strip()
         if not name:
             return
-        profile_path = PROFILES_DIR / f"{name}.json"
+        profile_path = self._server_dir() / "profiles" / f"{name}.json"
         if not profile_path.exists():
             self.root.after(0, lambda: self.profile_status.configure(text=f"Profile '{name}' not found"))
             return
@@ -3017,7 +3773,7 @@ java -Xms{xms} -Xmx{xmx} -jar "{jar}" nogui
 pause
 """
 
-        out_dir = SERVER_DIR / "scripts"
+        out_dir = self._server_dir() / "scripts"
         out_dir.mkdir(parents=True, exist_ok=True)
 
         sh_path = out_dir / "start.sh"
@@ -3035,10 +3791,524 @@ pause
             self._log(f"Failed to generate scripts: {e}", "error")
 
     def _write_eula(self):
-        EULA_FILE.write_text("eula=true\n")
+        (self._server_dir() / "eula.txt").write_text("eula=true\n")
         self.config["accepted_eula"] = True
         self.eula_var.set(True)
         self._save_config()
+
+    def _on_notifications_toggle(self):
+        self.config["notifications_enabled"] = self.notifications_var.get()
+        self._save_config()
+
+    def _send_notification(self, title, message):
+        if not self.config.get("notifications_enabled", True):
+            return
+        def _do():
+            try:
+                system = platform.system()
+                if system == "Linux":
+                    subprocess.run(
+                        ["notify-send", title, message],
+                        capture_output=True, timeout=5
+                    )
+                elif system == "Darwin":
+                    subprocess.run(
+                        ["osascript", "-e",
+                         f'display notification "{message}" with title "{title}"'],
+                        capture_output=True, timeout=5
+                    )
+                elif system == "Windows":
+                    ps_cmd = (
+                        f"Add-Type -AssemblyName System.Windows.Forms;"
+                        f"[System.Windows.Forms.MessageBox]::Show('{message}', '{title}')"
+                    )
+                    subprocess.run(
+                        ["powershell", "-Command", ps_cmd],
+                        capture_output=True, timeout=5
+                    )
+            except Exception:
+                pass
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _notify_player_join(self, player):
+        self._send_notification("MCServerHost", f"{player} joined the server")
+
+    def _notify_player_leave(self, player):
+        self._send_notification("MCServerHost", f"{player} left the server")
+
+    def _build_configs_tab(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="  Configs  ")
+
+        top = ttk.Frame(tab)
+        top.pack(fill=tk.BOTH, expand=True, padx=14, pady=12)
+
+        ttk.Label(top, text="Config File Editor", style="SubHeader.TLabel").pack(anchor="w")
+
+        body = ttk.Frame(top)
+        body.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+
+        left = ttk.Frame(body)
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+
+        ttk.Label(left, text="Config Files", style="Dim.TLabel",
+                  font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 4))
+
+        self.config_tree = ttk.Treeview(left, columns=("File",), show="headings", selectmode="browse", height=10)
+        self.config_tree.heading("File", text="Filename")
+        self.config_tree.column("File", width=240)
+        cfg_scroll = ttk.Scrollbar(left, orient="vertical", command=self.config_tree.yview)
+        self.config_tree.configure(yscrollcommand=cfg_scroll.set)
+        self.config_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        cfg_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.config_tree.bind("<<TreeviewSelect>>", lambda e: self._load_selected_config())
+        self.config_tree.tag_configure("exists", foreground=FG_GREEN)
+        self.config_tree.tag_configure("missing", foreground=FG_DIM)
+
+        right = ttk.Frame(body)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.config_status = ttk.Label(right, text="Select a config file to edit", style="Dim.TLabel")
+        self.config_status.pack(anchor="w", pady=(0, 4))
+
+        self.config_editor = scrolledtext.ScrolledText(
+            right, wrap=tk.WORD, bg=BG_ENTRY, fg=FG_MAIN, insertbackground=FG_ACCENT,
+            font=("Cascadia Code", 10), relief=tk.FLAT, borderwidth=0,
+            selectbackground=BG_HOVER, selectforeground=FG_BRIGHT,
+            padx=10, pady=6, spacing1=1
+        )
+        self.config_editor.pack(fill=tk.BOTH, expand=True)
+
+        btn_row = ttk.Frame(right)
+        btn_row.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(btn_row, text="Save", style="Green.TButton",
+                   command=self._save_selected_config).pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="Reload", command=self._load_selected_config).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btn_row, text="Create", style="Blue.TButton",
+                   command=self._create_config_file).pack(side=tk.LEFT)
+        self.config_save_status = ttk.Label(btn_row, text="", style="Dim.TLabel")
+        self.config_save_status.pack(side=tk.LEFT, padx=8)
+
+        self._config_files = [
+            "server.properties",
+            "bukkit.yml",
+            "spigot.yml",
+            "paper-global.yml",
+            "paper-world-defaults.yml",
+            "config/paper-global.yml",
+            "config/paper/world-defaults.yml",
+        ]
+        self._selected_config_path = None
+        self._refresh_config_list()
+
+    def _refresh_config_list(self):
+        for item in self.config_tree.get_children():
+            self.config_tree.delete(item)
+        for fname in self._config_files:
+            fpath = self._server_dir() / fname
+            exists = fpath.exists()
+            tag = "exists" if exists else "missing"
+            display = fname if exists else f"{fname}  (missing)"
+            self.config_tree.insert("", "end", values=(display,), tags=(tag,), iid=fname)
+
+    def _load_selected_config(self):
+        sel = self.config_tree.selection()
+        if not sel:
+            return
+        fname = sel[0]
+        fpath = self._server_dir() / fname
+        self._selected_config_path = fpath
+        if not fpath.exists():
+            self.config_editor.delete("1.0", tk.END)
+            self.config_status.configure(text=f"{fname} does not exist — click Create to add it")
+            self.config_save_status.configure(text="")
+            return
+        try:
+            content = fpath.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            self.config_status.configure(text=f"Error reading {fname}: {e}")
+            return
+        self.config_editor.delete("1.0", tk.END)
+        self.config_editor.insert("1.0", content)
+        self.config_status.configure(text=f"Editing: {fname}")
+        self.config_save_status.configure(text="")
+
+    def _save_selected_config(self):
+        if not self._selected_config_path:
+            return
+        fpath = self._selected_config_path
+        content = self.config_editor.get("1.0", tk.END).rstrip("\n") + "\n"
+        try:
+            fpath.parent.mkdir(parents=True, exist_ok=True)
+            fpath.write_text(content, encoding="utf-8")
+            self.config_save_status.configure(text="Saved!", style="Ok.TLabel")
+            self._log(f"Config saved: {fpath.name}", "success")
+        except Exception as e:
+            self.config_save_status.configure(text=f"Error: {e}", style="Err.TLabel")
+
+    def _create_config_file(self):
+        if not self._selected_config_path:
+            return
+        fpath = self._selected_config_path
+        if fpath.exists():
+            messagebox.showinfo("Already Exists", f"{fpath.name} already exists.")
+            return
+        templates = {
+            "server.properties": generate_server_properties(self.config),
+            "bukkit.yml": (
+                "settings:\n"
+                "  allow-end: true\n"
+                "  warn-on-overload: true\n"
+                "  permissions-file: permissions.yml\n"
+                "  update-folder: update\n"
+                "  plugin-profiling: false\n"
+                "  deprecated-alias: warn-on-use\n"
+                "  shutdown-message: Server closed\n"
+                "  minimum-api: none\n"
+                "spam-limiter:\n"
+                "  thrsh-perSec: 20\n"
+                "  thrsh-per-10Sec: 100\n"
+                "  kick-message: <red>Too many packets!</red>\n"
+                "commands:\n"
+                "  replace-commands:\n"
+                "  - setblock\n"
+                "  log: true\n"
+                "  spam-limit: 200\n"
+                "world-settings:\n"
+                "  default:\n"
+                "    mob-spawn-range: 4\n"
+                "    item-despawn-rate: 6000\n"
+                "    merge-radius:\n"
+                "      exp: 3.0\n"
+                "      item: 2.5\n"
+                "    arrow-despawn-rate: 6000\n"
+                "    enable-zombie-pigmen-portal-spawns: true\n"
+            ),
+            "spigot.yml": (
+                "settings:\n"
+                "  save-user-cache-on-stop-only: false\n"
+                "  bungeecord: false\n"
+                "  sample-count: 12\n"
+                "  player-shuffle: 0\n"
+                "  user-cache-size: 1000\n"
+                "  moved-wrongly-threshold: 0.0625\n"
+                "  moved-too-quickly-multiplier: 10.0\n"
+                "  log-villager-deaths: true\n"
+                "  log-npc-deaths: false\n"
+                "commands:\n"
+                "  spam-exclusions:\n"
+                "  - skill\n"
+                "  silent-commandblock: false\n"
+                "  replace-commands:\n"
+                "  - setblock\n"
+                "  log: true\n"
+                "  tab-complete: 0\n"
+                "  send-namespaced: true\n"
+                "advancements:\n"
+                "  disable-saving: false\n"
+                "  disabled:\n"
+                "  - minecraft:story/disabled\n"
+                "world-settings:\n"
+                "  default:\n"
+                "    mob-spawn-range: 4\n"
+                "    item-despawn-rate: 6000\n"
+                "    merge-radius:\n"
+                "      exp: 3.0\n"
+                "      item: 2.5\n"
+                "    arrow-despawn-rate: 6000\n"
+                "    enable-zombie-pigmen-portal-spawns: true\n"
+            ),
+            "paper-global.yml": (
+                "_version: 30\n"
+                "chunk-loading-advanced:\n"
+                "  auto-config-send-distance: true\n"
+                "  player-max-view-distance-chunk-load-rate: -1.0\n"
+                "  player-max-chunk-generate-rate: -1.0\n"
+                "  player-max-chunk-load-rate: -1.0\n"
+                "  player-max-chunk-send-rate: -1.0\n"
+                "chunk-loading-basic:\n"
+                "  auto-config-send-distance: true\n"
+                "  per-player-send-distance: true\n"
+                "  player-max-chunk-generate-rate: -1.0\n"
+                "  player-max-chunk-load-rate: -1.0\n"
+                "  player-max-chunk-send-rate: -1.0\n"
+                "chunk-system:\n"
+                "  gen-parallelism: default\n"
+                "  io-threads: auto\n"
+                "  worker-threads: auto\n"
+                "collisions:\n"
+                "  enable-player-collisions: false\n"
+                "  send-full-pos-for-hard-colliding-entities: true\n"
+                "commands:\n"
+                "  fix-target-selector-tag-completion: true\n"
+                "  suggest-player-names-when-null-tab-completions: true\n"
+                "  time-command-affects-all-worlds: false\n"
+                "console:\n"
+                "  enable-brigadier-completions: true\n"
+                "  enable-brigadier-highlighting: true\n"
+                "  has-all-permissions: false\n"
+                "item-validation:\n"
+                "  book:\n"
+                "    author: 8192\n"
+                "    page: 16384\n"
+                "    title: 8192\n"
+                "  display-name: 8192\n"
+                "  lore-line: 8192\n"
+                "  resolve-selectors-in-books: false\n"
+                "logging:\n"
+                "  deobfuscate-stacktraces: true\n"
+                "  log-player-ip-addresses: true\n"
+                "  use-rgb-for-named-text-colors: true\n"
+                "messages:\n"
+                "  kick:\n"
+                "    authentication-servers-down: <translation:message.authserver.down>\n"
+                "    connection-throttle: <red>Connection throttled! Please wait.</red>\n"
+                "    connection-throttle-kick: <red>Connection throttled! Please wait.</red>\n"
+                "  no-permission: <red>I'm sorry, but you do not have permission to perform this command.</red>\n"
+                "  use-display-name-in-quit-message: false\n"
+                "misc:\n"
+                "  chat-threads:\n"
+                "    chat-executor-core-size: -1\n"
+                "    chat-executor-max-size: -1\n"
+                "  fix-entity-position-desync: true\n"
+                "  lag-compensate-block-breaking: true\n"
+                "  load-permissions-yml-before-plugins: true\n"
+                "  max-joins-per-tick: 5\n"
+                "  region-file-cache-size: 256\n"
+                "  strict-advancement-walk-check: false\n"
+                "pack:\n"
+                "  auto-download: false\n"
+                "  auto-inject-libraries: false\n"
+                "  auto-update: true\n"
+                "  prevent-modifiers: false\n"
+                "  repos:\n"
+                "  - https://repo.papermc.io/repository/maven-public/\n"
+                "player-auto-save:\n"
+                "  enabled: true\n"
+                "  max-per-tick: -1\n"
+                "  rate: 6000\n"
+                "proxies:\n"
+                "  bungee-cord:\n"
+                "    online-mode: true\n"
+                "  proxy-protocol: false\n"
+                "  velocity:\n"
+                "    enabled: false\n"
+                "    online-mode: false\n"
+                "    secret: ''\n"
+                "scoreboards:\n"
+                "  save-empty-scoreboard-teams: false\n"
+                "  track-plugin-scoreboards: false\n"
+                "spam-limiter:\n"
+                "  incoming-packet-threshold: 300\n"
+                "  recipe-spam-increment: 1\n"
+                "  recipe-spam-limit: 20\n"
+                "  tab-spam-increment: 1\n"
+                "  tab-spam-limit: 500\n"
+                "timings:\n"
+                "  enabled: true\n"
+                "  hidden-config-entries:\n"
+                "  - database\n"
+                "  - proxies.velocity.secret\n"
+                "  history-interval: 300\n"
+                "  history-length: 3600\n"
+                "  server-name: Unknown Server\n"
+                "  server-name-privacy: false\n"
+                "  url: https://timings.aikar.co/\n"
+                "  verbose: true\n"
+                "unsupported-settings:\n"
+                "  allow-grindstone-overstacking: false\n"
+                "  allow-headless-pistons: false\n"
+                "  allow-permanent-block-break-exploits: false\n"
+                "  allow-piston-duplication: false\n"
+                "  perform-username-validation: true\n"
+                "watchdog:\n"
+                "  early-warning-delay: 10000\n"
+                "  early-warning-every: 5000\n"
+            ),
+            "paper-world-defaults.yml": (
+                "_version: 31\n"
+                "ant-xray:\n"
+                "  enabled: true\n"
+                "  mode: ENGINE\n"
+                "  lava-obfuscation: true\n"
+                "  replacement-blocks:\n"
+                "  - netherrack\n"
+                "  - deepslate\n"
+                "  - deepslate_ore\n"
+                "chunks:\n"
+                "  auto-save-interval: -1\n"
+                "  delay-chunk-unloads-by: 10s\n"
+                "  entity-per-chunk-save-limit:\n"
+                "    arrow: 16\n"
+                "    ender_pearl: 8\n"
+                "    experience_orb: 16\n"
+                "    fireball: 8\n"
+                "    small_fireball: 8\n"
+                "    snowball: 8\n"
+                "  fixed-chunk-inhabited-time: -1\n"
+                "  max-auto-save-chunks-per-tick: -1\n"
+                "  region-file-format: ANVIL\n"
+                "  schedule-save-auto: false\n"
+                "  save-empty-chunk-sections: false\n"
+                "environment:\n"
+                "  disable-explosion-knockback: false\n"
+                "  disable-ice-and-snow: false\n"
+                "  disable-teleportation-suffocation-check: false\n"
+                "  disable-thunder: false\n"
+                "  fire-tick-delay: 30\n"
+                "  frosted-ice:\n"
+                "    delay-min: 40\n"
+                "    delay-max: 60\n"
+                "    enabled: true\n"
+                "  generate-flat-bedrock: false\n"
+                "  nether-ceiling-void-damage-height: disabled\n"
+                "  optimize-explosions: false\n"
+                "  portal-create-radius: 16\n"
+                "  portal-search-radius: 128\n"
+                "  portal-search-vanilla-dimension-scaling: true\n"
+                "  treasure-maps:\n"
+                "    enabled: true\n"
+                "    finding-chunks-per-tick: 9\n"
+                "    max-search-radius: 100\n"
+                "  water-over-lava-flow-speed: 5\n"
+                "entities:\n"
+                "  armor-feet:\n"
+                "    allow: true\n"
+                "  armor-head:\n"
+                "    allow: true\n"
+                "  armor-legs:\n"
+                "    allow: true\n"
+                "  armor-torso:\n"
+                "    allow: true\n"
+                "  experience-orb:\n"
+                "    allow: true\n"
+                "  minecart-rideable:\n"
+                "    allow: true\n"
+                "  mob-spawner:\n"
+                "    allow: true\n"
+                "  axolotl:\n"
+                "    survival-despawn-range:\n"
+                "      ambient: 59\n"
+                "      peaceful: 59\n"
+                "      total: 120\n"
+                "  armor-stand:\n"
+                "    tick: true\n"
+                "    optimize-effects: true\n"
+                "  arrows:\n"
+                "    allow-tnt-piston: true\n"
+                "    creative-arrow-despawn-rate: 6000\n"
+                "    survival-arrow-despawn-rate: 300\n"
+                "  mobs:\n"
+                "    can-move-off-wall: true\n"
+                "    water-over-lava-flow-speed: 5\n"
+                "    disable-chest-cat-detection: true\n"
+                "    disable-creeper-lingering-effect: false\n"
+                "    disable-player-crits: false\n"
+                "    door-breaking-difficulty:\n"
+                "      husk:\n"
+                "      - normal\n"
+                "      - hard\n"
+                "      vindicator:\n"
+                "      - normal\n"
+                "      - hard\n"
+                "      ravager:\n"
+                "      - hard\n"
+                "    mob-effects:\n"
+                "      immune-to-wither-effect:\n"
+                "        wither: true\n"
+                "        skeleton: true\n"
+                "    nerf-piglin-love: false\n"
+                "    parrots-are-unaffected-by-player-movement: false\n"
+                "    phantoms-do-not-spawn-on-creative-players: true\n"
+                "    pillager-patrols:\n"
+                "      disable: false\n"
+                "      start: 5\n"
+                "      step: 1\n"
+                "      per-player: false\n"
+                "    piglins-guard-chests: true\n"
+                "    pillager-patrol-disable-distance: -1\n"
+                "    should-remove-dragon: false\n"
+                "    zombie-villager-infection-chance: default\n"
+                "    zombies-target-turtle-eggs: true\n"
+                "  vehicles:\n"
+                "    fix-climbing-bypassing-cramming: true\n"
+                "    max-entities-with-dismount: 24\n"
+                "  villagers:\n"
+                "    display-trading-seasons: true\n"
+                "    filter-bad-tile-entities-from-falling-blocks: true\n"
+                "    find-golems-looking-for-home: false\n"
+                "    ignore-villager-workload-protection: false\n"
+                "    max-brain-ticks: 40\n"
+                "    wandering-trader:\n"
+                "      spawn-chance-failure-increment: 25\n"
+                "      spawn-day-max: 3\n"
+                "      spawn-day-min: 1\n"
+                "      spawn-minute-max: 1200\n"
+                "      spawn-minute-min: 600\n"
+                "    trade-rebalance: false\n"
+                "unsupported-settings:\n"
+                "  fix-invulnerable-end-crystal-exploit: true\n"
+                "version:\n"
+                "  auto-save-interval: -1\n"
+                "  keep-spawn-loaded: false\n"
+                "  keep-spawn-loaded-in-nether: false\n"
+            ),
+        }
+        for key in ("config/paper-global.yml", "config/paper/world-defaults.yml"):
+            alt = key.split("/")[-1]
+            if key not in templates and alt in templates:
+                templates[key] = templates[alt]
+        content = templates.get(fpath.name, templates.get(str(fpath.relative_to(self._server_dir())), ""))
+        if not content:
+            content = f"# {fpath.name}\n# Edit this file manually\n"
+        try:
+            fpath.parent.mkdir(parents=True, exist_ok=True)
+            fpath.write_text(content, encoding="utf-8")
+            self.config_save_status.configure(text="Created!", style="Ok.TLabel")
+            self._log(f"Config created: {fpath.name}", "success")
+            self._refresh_config_list()
+            self.config_tree.selection_set(fpath.name)
+            self._load_selected_config()
+        except Exception as e:
+            self.config_save_status.configure(text=f"Error: {e}", style="Err.TLabel")
+
+    def _download_world(self):
+        if self.running:
+            messagebox.showwarning("Server Running", "Stop the server before downloading the world.")
+            return
+        world_name = self.config.get("level_name", "world")
+        world_dir = self._server_dir() / world_name
+        if not world_dir.exists():
+            messagebox.showwarning("No World", f"World directory '{world_name}' not found.")
+            return
+        ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        default_name = f"world_backup_{ts}.zip"
+        save_path = filedialog.asksaveasfilename(
+            defaultextension=".zip",
+            filetypes=[("ZIP files", "*.zip"), ("All files", "*.*")],
+            initialfile=default_name,
+            title="Save World As"
+        )
+        if not save_path:
+            return
+        self._log(f"Zipping world '{world_name}'...", "info")
+        self.world_download_status.configure(text="Zipping world...")
+
+        def _do():
+            try:
+                with zipfile.ZipFile(save_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                    for root, dirs, files in os.walk(str(world_dir)):
+                        for file in files:
+                            fp = os.path.join(root, file)
+                            arcname = os.path.relpath(fp, str(world_dir))
+                            zf.write(fp, arcname)
+                self._log(f"World saved to {save_path}", "success")
+                self.root.after(0, lambda: self.world_download_status.configure(text="Done!"))
+            except Exception as e:
+                self._log(f"World download failed: {e}", "error")
+                self.root.after(0, lambda: self.world_download_status.configure(text="Failed"))
+
+        threading.Thread(target=_do, daemon=True).start()
 
     def _on_close(self):
         self.stopped_manually = True

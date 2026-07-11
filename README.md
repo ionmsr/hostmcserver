@@ -72,6 +72,12 @@ Requires manual port forwarding on your router. The app can automatically open t
 - Auto-restart on crash with configurable delay.
 - Scheduled restarts at configurable intervals.
 
+### Multi-Server Support
+
+- Manage multiple server instances from one GUI.
+- Create, switch, and delete server instances.
+- Each instance has its own config, world, plugins, and mods.
+
 ### World Management
 
 - Automatic world backup before each server start.
@@ -85,10 +91,16 @@ Requires manual port forwarding on your router. The app can automatically open t
 - Dedicated Bans tab: player ban and IP ban lists with live display.
 - Online players display updated in real time.
 
-### Plugin Manager
+### Plugin & Mod Manager
 
 - Search the Modrinth plugin repository directly from the Plugins tab.
 - One-click plugin installation for Paper and Fabric servers.
+- Mod browser for Fabric and Forge servers — browse and install mods from Modrinth.
+
+### Chat Panel
+
+- Dedicated chat view in the Console tab showing player chat messages.
+- Color-coded: player names in accent color, messages in main color.
 
 ### Network and Security
 
@@ -100,12 +112,32 @@ Requires manual port forwarding on your router. The app can automatically open t
 ### Configuration
 
 - All server.properties fields editable from the GUI.
+- Config file editors for bukkit.yml, spigot.yml, paper-global.yml, and more.
+- Resource pack management (URL, hash, prompt, require).
 - Server profiles: save, load, and delete configuration presets.
 - Quick presets for common server types (Survival SMP, Hardcore, Creative, Skyblock, PVP, and more).
+
+### Cloud Backup & Migration
+
+- Auto-backup to cloud using rclone (Google Drive, S3, and more).
+- Server migration wizard: package server as .tar.gz for transfer.
+- Import server from .tar.gz archive into a new instance.
+
+### Performance Dashboard
+
+- Real-time Stats tab with RAM usage and TPS graphs.
+- Current RAM, TPS, uptime, and player count cards.
+- TPS color coding: green (>=18), yellow (15-18), red (<15).
+
+### Desktop Notifications
+
+- System notifications on server start/stop and player join/leave.
+- Cross-platform: Linux (notify-send), macOS (osascript), Windows (PowerShell).
 
 ### Utilities
 
 - RAM monitoring with live display in the header bar.
+- World download: export world folder as a zip.
 - Server auto-update to the latest build.
 - Startup script generator: export standalone `start.sh` and `start.bat` files.
 - Crash report analyzer: parses Minecraft crash reports and suggests fixes.
@@ -124,6 +156,8 @@ All configuration is stored in `~/MCServerHost/config.json`. Server files, world
 | `~/MCServerHost/profiles/` | Saved server profile presets |
 | `~/MCServerHost/scripts/` | Generated startup scripts |
 | `~/MCServerHost/plugins/` | Installed server plugins |
+| `~/MCServerHost/mods/` | Installed server mods |
+| `~/MCServerHost/servers/` | Additional server instances |
 
 ## Platform Support
 
