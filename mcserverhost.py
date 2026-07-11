@@ -80,8 +80,8 @@ def _install_tkinter():
             pyver = f"python{sys.version_info.major}.{sys.version_info.minor}"
             r = _install_package(f"{pyver}-tk")
             if r.returncode != 0:
-                _install_package("python3-tk")
-            return True
+                r = _install_package("python3-tk")
+            return r.returncode == 0
         elif pm == "dnf":
             return _install_package("python3-tkinter").returncode == 0
         elif pm == "yum":
@@ -109,13 +109,13 @@ def _install_java():
         if pm in ("apt", "apt-get"):
             r = _install_package("openjdk-21-jre-headless")
             if r.returncode != 0:
-                _install_package("openjdk-17-jre-headless")
-            return True
+                r = _install_package("openjdk-17-jre-headless")
+            return r.returncode == 0
         elif pm in ("dnf", "yum"):
             r = _install_package("java-21-openjdk-headless")
             if r.returncode != 0:
-                _install_package("java-17-openjdk-headless")
-            return True
+                r = _install_package("java-17-openjdk-headless")
+            return r.returncode == 0
         elif pm == "pacman":
             return _install_package("jre-openjdk").returncode == 0
         elif pm == "zypper":
@@ -464,11 +464,12 @@ def get_vanilla_download_url(version):
 
 def download_file(url, dest, progress_cb=None):
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    tmp = dest + ".tmp"
     try:
         with urllib.request.urlopen(req, timeout=300) as resp:
             total = int(resp.headers.get("Content-Length", 0))
             done = 0
-            with open(dest, "wb") as f:
+            with open(tmp, "wb") as f:
                 while True:
                     chunk = resp.read(65536)
                     if not chunk:
@@ -477,8 +478,13 @@ def download_file(url, dest, progress_cb=None):
                     done += len(chunk)
                     if progress_cb and total > 0:
                         progress_cb(done, total)
+        shutil.move(tmp, dest)
         return True
     except Exception:
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
         return False
 
 
@@ -664,6 +670,7 @@ class MCServerHost:
         self._log_flush_id = None
         self._log_queue = []
         self._log_lock = threading.Lock()
+        self._players_lock = threading.Lock()
 
         self.config = self._load_config()
         self._setup_styles()
@@ -911,7 +918,12 @@ class MCServerHost:
             row = ttk.Frame(parent)
             row.pack(fill=tk.X, pady=2)
             ttk.Label(row, text=label, width=18, anchor="w").pack(side=tk.LEFT)
-            var = tk.StringVar(value=str(self.config.get(key, "")))
+            raw = self.config.get(key, "")
+            if isinstance(raw, bool):
+                val = str(raw).lower()
+            else:
+                val = str(raw)
+            var = tk.StringVar(value=val)
             if values:
                 ttk.Combobox(row, textvariable=var, values=values, width=width, state="readonly").pack(side=tk.LEFT, padx=(4, 0))
             else:
@@ -1149,12 +1161,6 @@ class MCServerHost:
                 facets.append(["categories:paper"])
             elif stype == "fabric":
                 facets.append(["categories:fabric"])
-            params = {
-                "query": query,
-                "limit": 20,
-            }
-            if mc_ver:
-                params["game_versions"] = f'["{mc_ver}"]'
             facets_str = json.dumps(facets)
             url = f"{MODRINTH_API}/search?facets={urllib.parse.quote(facets_str)}&query={urllib.parse.quote(query)}&limit=20"
             if mc_ver:
@@ -1342,8 +1348,7 @@ class MCServerHost:
     def _log(self, msg, tag="info"):
         with self._log_lock:
             self._log_queue.append((msg, tag))
-        self._write_log_line(msg)
-        with self._log_lock:
+            self._write_log_line(msg)
             if self._log_flush_id is None:
                 self._log_flush_id = self.root.after(16, self._flush_log_queue)
 
@@ -1370,9 +1375,10 @@ class MCServerHost:
 
     # ── Initial Checks ──────────────────────────────────────
     def _initial_checks(self):
-        threading.Thread(target=self._do_initial_checks, daemon=True).start()
+        stype = self.server_type_var.get()
+        threading.Thread(target=self._do_initial_checks, args=(stype,), daemon=True).start()
 
-    def _do_initial_checks(self):
+    def _do_initial_checks(self, stype):
         java_ver, java_desc = check_java()
         if java_ver and java_ver >= 17:
             self.root.after(0, lambda: self._set_card(self.java_card, f"Java: OK - {java_desc}", True))
@@ -1381,7 +1387,12 @@ class MCServerHost:
             self.root.after(0, lambda: self._set_card(self.java_card, f"Java: MISSING - {hint}", False))
         self.java_ok = java_ver is not None and java_ver >= 17
 
-        self._check_server_installed()
+        jar_map = {"paper": PAPER_JAR, "vanilla": VANILLA_JAR, "fabric": FABRIC_JAR, "forge": FORGE_JAR}
+        jar = jar_map.get(stype, PAPER_JAR)
+        exists = jar.exists()
+        label = f"{stype.title()}: Downloaded" if exists else f"{stype.title()}: Not downloaded"
+        self.root.after(0, lambda: self._set_card(self.paper_card, label, exists))
+        self.paper_ready = exists
 
         if PLAYIT_BIN.exists():
             self.root.after(0, lambda: self._set_card(self.playit_card, "playit.gg: Downloaded", True))
@@ -1390,11 +1401,14 @@ class MCServerHost:
             self.root.after(0, lambda: self._set_card(self.playit_card, "playit.gg: Not downloaded", False))
             self.playit_ready = False
 
-        self._fetch_versions()
+        self._fetch_versions_for(stype)
         self._fetch_ip()
 
     def _fetch_versions(self):
         stype = self.server_type_var.get()
+        self._fetch_versions_for(stype)
+
+    def _fetch_versions_for(self, stype):
         def _do():
             if stype == "paper":
                 versions = get_latest_paper_version()
@@ -1451,6 +1465,7 @@ class MCServerHost:
 
     def _on_eula_toggle(self):
         self.config["accepted_eula"] = self.eula_var.get()
+        self._save_config()
 
     def _on_server_type_change(self):
         stype = self.server_type_var.get()
@@ -1693,8 +1708,7 @@ class MCServerHost:
         if self.auto_backup_var.get():
             self._auto_backup_world()
 
-        java_ver, _ = check_java()
-        if not java_ver or java_ver < 17:
+        if not getattr(self, 'java_ok', False):
             self._log("Java 17+ is required! Please install Java.", "error")
             return
 
@@ -1710,7 +1724,8 @@ class MCServerHost:
             self.running = True
             self.server_ready = False
             self.stopped_manually = False
-            self.online_players.clear()
+            with self._players_lock:
+                self.online_players.clear()
             self.root.after(0, self._update_players_display)
             self.root.after(0, lambda: self.start_btn.configure(state="disabled"))
             self.root.after(0, lambda: self.stop_btn.configure(state="normal"))
@@ -1726,32 +1741,40 @@ class MCServerHost:
         except Exception as e:
             self._log(f"Failed to start server: {e}", "error")
             self.running = False
+            self.start_btn.configure(state="normal")
+            self.stop_btn.configure(state="disabled")
+            self._set_status("Offline", False)
+            self.running = False
 
     def _read_server_output(self):
         proc = self.server_process
         if not proc or not proc.stdout:
             return
         start_time = time.time()
-        for line in proc.stdout:
-            line = line.rstrip("\n")
-            if not line:
-                continue
-            tag = "info"
-            if "[ERROR]" in line or "[error]" in line.lower() or "SEVERE" in line:
-                tag = "error"
-            elif "[WARN]" in line or "[warning]" in line.lower():
-                tag = "warn"
-            elif "Done" in line and "For help" in line:
-                tag = "success"
-                self.server_ready = True
-            self._parse_player_event(line)
-            self._log(line, tag)
+        try:
+            for line in proc.stdout:
+                line = line.rstrip("\n")
+                if not line:
+                    continue
+                tag = "info"
+                if "[ERROR]" in line or "[error]" in line.lower() or "SEVERE" in line:
+                    tag = "error"
+                elif "[WARN]" in line or "[warning]" in line.lower():
+                    tag = "warn"
+                elif "Done" in line and "For help" in line:
+                    tag = "success"
+                    self.server_ready = True
+                self._parse_player_event(line)
+                self._log(line, tag)
+        except (ValueError, OSError):
+            pass
         rc = proc.wait()
         uptime = time.time() - start_time
         self._log(f"Server stopped (exit code {rc})", "warn" if rc == 0 else "error")
         self.running = False
         self.server_ready = False
-        self.online_players.clear()
+        with self._players_lock:
+            self.online_players.clear()
         self.root.after(0, self._update_players_display)
         if not self.stopped_manually and self.auto_restart_var.get() and uptime > 5:
             delay = int(self.restart_delay_var.get())
@@ -1913,9 +1936,12 @@ class MCServerHost:
 
     # ── Config Save ─────────────────────────────────────────
     def _save_server_config(self):
+        BOOL_KEYS = {"online_mode", "pvp", "white_list", "hardcore"}
         for key, var in self._cfg_vars.items():
             val = var.get()
-            if key in ("server_port", "max_players", "view_distance", "spawn_protection"):
+            if key in BOOL_KEYS:
+                val = val == "true"
+            elif key in ("server_port", "max_players", "view_distance", "spawn_protection"):
                 try:
                     val = int(val)
                 except ValueError:
@@ -1978,20 +2004,30 @@ class MCServerHost:
         leave_match = re.search(r'(\w+)\s+left the game', line)
         if join_match:
             player = join_match.group(1)
-            self.online_players.add(player)
+            with self._players_lock:
+                self.online_players.add(player)
             self.root.after(0, self._update_players_display)
         elif leave_match:
             player = leave_match.group(1)
-            self.online_players.discard(player)
+            with self._players_lock:
+                self.online_players.discard(player)
             self.root.after(0, self._update_players_display)
 
     def _update_players_display(self):
-        if self.online_players:
-            self.players_lbl.configure(text=", ".join(sorted(self.online_players)))
+        with self._players_lock:
+            players = sorted(self.online_players)
+        if players:
+            self.players_lbl.configure(text=", ".join(players))
         else:
             self.players_lbl.configure(text="None")
 
     def _auto_backup_world(self):
+        world_dir = SERVER_DIR / self.config.get("level_name", "world")
+        if not world_dir.exists():
+            return
+        threading.Thread(target=self._do_backup_world, daemon=True).start()
+
+    def _do_backup_world(self):
         world_dir = SERVER_DIR / self.config.get("level_name", "world")
         if not world_dir.exists():
             return
@@ -2048,7 +2084,8 @@ class MCServerHost:
         if not backups_dir.exists():
             messagebox.showinfo("No Backups", "No backups found.")
             return
-        backups = sorted(backups_dir.glob("world_backup_*.zip"), reverse=True)
+        backups = sorted(backups_dir.glob("world_backup_*.zip"),
+                         key=lambda p: p.stat().st_mtime, reverse=True)
         if not backups:
             messagebox.showinfo("No Backups", "No backups found.")
             return
@@ -2298,6 +2335,20 @@ class MCServerHost:
                     return
                 dest = str(PAPER_JAR)
                 label = f"Paper {ver} build {build_id}"
+            elif stype == "fabric":
+                url, fname = get_fabric_server_url(ver)
+                if not url:
+                    self._log(f"No Fabric server found for {ver}", "error")
+                    return
+                dest = str(FABRIC_JAR)
+                label = f"Fabric {ver}"
+            elif stype == "forge":
+                url, fname, _ = get_forge_server_url(ver)
+                if not url:
+                    self._log(f"No Forge installer found for {ver}", "error")
+                    return
+                dest = str(FORGE_JAR)
+                label = f"Forge {ver}"
             else:
                 url = get_vanilla_download_url(ver)
                 if not url:
@@ -2543,7 +2594,8 @@ class MCServerHost:
                 ts = time.strftime("%Y-%m-%d %H:%M:%S")
                 self.log_file.write(f"[{ts}] {msg}\n")
                 self.log_file.flush()
-                if self.log_file.tell() > 10 * 1024 * 1024:
+                log_path = Path(self.log_file.name)
+                if log_path.exists() and log_path.stat().st_size > 10 * 1024 * 1024:
                     self.log_file.close()
                     self._open_log_file()
             except Exception:
@@ -2694,7 +2746,7 @@ class MCServerHost:
 
 cd "$(dirname "$0")/.."
 
-java -Xms{xms} -Xmx{xmx} -jar {jar} nogui
+java -Xms{xms} -Xmx{xmx} -jar "{jar}" nogui
 """
 
         bat_content = f"""@echo off
@@ -2703,7 +2755,7 @@ REM Server type: {stype.title()}
 REM Generated by MCServerHost
 
 cd /d "%~dp0.."
-java -Xms{xms} -Xmx{xmx} -jar {jar} nogui
+java -Xms{xms} -Xmx{xmx} -jar "{jar}" nogui
 pause
 """
 
@@ -2740,6 +2792,7 @@ pause
             except Exception:
                 pass
             self._log_flush_id = None
+        self._flush_log_queue()
         self._close_log_file()
         if self.running:
             if not messagebox.askokcancel("Quit", "Server is running. Stop it and quit?"):
