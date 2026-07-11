@@ -2248,13 +2248,17 @@ class MCServerHost:
         canvas = tk.Canvas(parent, bg=BG_DARK, highlightthickness=0, bd=0)
         scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         inner = ttk.Frame(canvas)
-        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=inner, anchor="nw", tags="inner")
+        inner_id = canvas.create_window((0, 0), window=inner, anchor="nw", tags="inner")
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        def _update_scrollregion(e=None):
+            inner.update_idletasks()
+            canvas.configure(scrollregion=(0, 0, canvas.winfo_width(), inner.winfo_reqheight()))
+        inner.bind("<Configure>", _update_scrollregion)
         def _on_cfg(e):
-            canvas.itemconfig("inner", width=canvas.winfo_width())
+            canvas.itemconfig(inner_id, width=canvas.winfo_width())
+            _update_scrollregion()
         canvas.bind("<Configure>", _on_cfg)
         def _enter(e):
             def _mw(ev):
