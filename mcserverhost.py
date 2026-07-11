@@ -1034,8 +1034,9 @@ class MCServerHost:
         s.configure("TNotebook.Tab", background=BG_MID, foreground=FG_DIM, padding=(18, 9),
                      font=FONT_UI, borderwidth=0, relief="flat")
         s.map("TNotebook.Tab",
-              background=[("selected", BG_LIGHT)],
-              foreground=[("selected", FG_BRIGHT)])
+              background=[("selected", BG_LIGHT), ("active", BG_HOVER)],
+              foreground=[("selected", FG_BRIGHT), ("active", FG_MAIN)],
+              padding=[("selected", (18, 9)), ("!selected", (18, 9))])
 
         s.configure("TCheckbutton", background=BG_DARK, foreground=FG_MAIN, font=FONT_UI)
         s.configure("TEntry", fieldbackground=BG_ENTRY, foreground=FG_MAIN, insertcolor=FG_ACCENT,
