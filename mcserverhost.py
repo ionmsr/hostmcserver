@@ -694,6 +694,9 @@ class MCServerHost:
         self.config = self._load_config()
         self._setup_styles()
         self._build_ui()
+        self.root.bind_all("<MouseWheel>", MCServerHost._on_global_mousewheel)
+        self.root.bind_all("<Button-4>", MCServerHost._on_global_mousewheel)
+        self.root.bind_all("<Button-5>", MCServerHost._on_global_mousewheel)
         self.root.after(200, self._initial_checks)
         self.root.after(300, self._refresh_players)
         self.root.after(300, self._refresh_bans)
@@ -2245,6 +2248,8 @@ class MCServerHost:
         c.create_text(pad_l + gw // 2, pad_t + gh + 16, text="Time", fill=FG_DIM, font=("Segoe UI", 8))
 
     # ── Helpers ─────────────────────────────────────────────
+    _scroll_canvases = []
+
     def _scrollable_frame(self, parent):
         canvas = tk.Canvas(parent, bg=BG_DARK, highlightthickness=0, bd=0)
         scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
@@ -2253,35 +2258,40 @@ class MCServerHost:
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas._is_scroll_canvas = True
+        MCServerHost._scroll_canvases.append(canvas)
+
         def _update_scrollregion(e=None):
             inner.update_idletasks()
             canvas.configure(scrollregion=(0, 0, canvas.winfo_width(), inner.winfo_reqheight()))
         inner.bind("<Configure>", _update_scrollregion)
+
         def _on_cfg(e):
             canvas.itemconfig(inner_id, width=canvas.winfo_width())
             _update_scrollregion()
         canvas.bind("<Configure>", _on_cfg)
-        def _enter(e):
-            def _mw(ev):
+
+        return inner
+
+    @staticmethod
+    def _on_global_mousewheel(ev):
+        widget = ev.widget
+        skip_types = (tk.Text, ttk.Treeview, ttk.Combobox, ttk.Spinbox)
+        while widget is not None:
+            if isinstance(widget, skip_types):
+                return
+            if getattr(widget, "_is_scroll_canvas", False):
                 if sys.platform == "darwin":
-                    canvas.yview_scroll(int(-1 * ev.delta), "units")
+                    widget.yview_scroll(int(-1 * ev.delta), "units")
                 elif sys.platform == "win32":
-                    canvas.yview_scroll(int(-1 * (ev.delta / 120)), "units")
+                    widget.yview_scroll(int(-1 * (ev.delta / 120)), "units")
                 else:
                     if ev.num == 4:
-                        canvas.yview_scroll(-3, "units")
+                        widget.yview_scroll(-3, "units")
                     elif ev.num == 5:
-                        canvas.yview_scroll(3, "units")
-            canvas.bind("<MouseWheel>", _mw)
-            canvas.bind("<Button-4>", _mw)
-            canvas.bind("<Button-5>", _mw)
-        def _leave(e):
-            canvas.unbind("<MouseWheel>")
-            canvas.unbind("<Button-4>")
-            canvas.unbind("<Button-5>")
-        canvas.bind("<Enter>", _enter)
-        canvas.bind("<Leave>", _leave)
-        return inner
+                        widget.yview_scroll(3, "units")
+                return
+            widget = widget.master
 
     def _info_card(self, parent):
         card = ttk.Frame(parent, style="Card.TFrame", padding=2)
