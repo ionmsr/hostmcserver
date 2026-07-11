@@ -103,27 +103,38 @@ def _install_tkinter():
 def _install_java():
     system = platform.system()
     pm = _detect_pkg_manager()
-    print("[bootstrap] Java 17+ not found. Installing OpenJDK...")
+    print("[bootstrap] Java 21+ not found. Installing OpenJDK...")
 
     if system == "Linux":
         if pm in ("apt", "apt-get"):
-            r = _install_package("openjdk-21-jre-headless")
-            if r.returncode != 0:
-                r = _install_package("openjdk-17-jre-headless")
-            return r.returncode == 0
+            for pkg in ("openjdk-25-jre-headless", "openjdk-21-jre-headless", "openjdk-17-jre-headless"):
+                r = _install_package(pkg)
+                if r.returncode == 0:
+                    return True
+            return False
         elif pm in ("dnf", "yum"):
-            r = _install_package("java-21-openjdk-headless")
-            if r.returncode != 0:
-                r = _install_package("java-17-openjdk-headless")
-            return r.returncode == 0
+            for pkg in ("java-25-openjdk-headless", "java-21-openjdk-headless", "java-17-openjdk-headless"):
+                r = _install_package(pkg)
+                if r.returncode == 0:
+                    return True
+            return False
         elif pm == "pacman":
             return _install_package("jre-openjdk").returncode == 0
         elif pm == "zypper":
-            return _install_package("java-21-openjdk-headless").returncode == 0
+            for pkg in ("java-25-openjdk-headless", "java-21-openjdk-headless", "java-17-openjdk-headless"):
+                r = _install_package(pkg)
+                if r.returncode == 0:
+                    return True
+            return False
     elif system == "Darwin":
-        return _install_package("openjdk").returncode == 0
+        if command_exists("brew"):
+            r = _install_package("openjdk")
+            if r.returncode == 0:
+                return True
+        print("[bootstrap] Install Java 21+ from https://adoptium.net")
+        return False
     elif system == "Windows":
-        print("[bootstrap] Download Java 17+ from https://adoptium.net")
+        print("[bootstrap] Download Java 21+ from https://adoptium.net")
         return False
     return False
 
@@ -151,10 +162,10 @@ def get_java_install_hint():
     if system == "Linux":
         return "Install with: sudo apt install openjdk-21-jre (Ubuntu/Debian)"
     elif system == "Windows":
-        return "Download from https://adoptium.net"
+        return "Download from https://adoptium.net (Java 21+)"
     elif system == "Darwin":
         return "Install with: brew install openjdk (Homebrew)"
-    return "Install Java 17+ from https://adoptium.net"
+    return "Install Java 21+ from https://adoptium.net"
 
 
 def bootstrap():
@@ -173,15 +184,15 @@ def bootstrap():
         print("[bootstrap] tkinter: OK")
 
     java_ver, java_info = check_java()
-    if not java_ver or java_ver < 17:
+    if not java_ver or java_ver < 21:
         if _install_java():
             java_ver2, java_info2 = check_java()
-            if java_ver2 and java_ver2 >= 17:
+            if java_ver2 and java_ver2 >= 21:
                 print(f"[bootstrap] Java: OK ({java_info2})")
             else:
                 print("[bootstrap] Java installed but may need a restart or PATH update.")
         else:
-            print("[bootstrap] Java not installed. Install Java 17+ from https://adoptium.net")
+            print("[bootstrap] Java not installed. Install Java 21+ from https://adoptium.net")
             print("[bootstrap] You can still open the app, but need Java to run the server.")
     else:
         print(f"[bootstrap] Java: OK ({java_info})")
@@ -2346,12 +2357,12 @@ class MCServerHost:
 
     def _do_initial_checks(self, stype):
         java_ver, java_desc = check_java()
-        if java_ver and java_ver >= 17:
+        if java_ver and java_ver >= 21:
             self.root.after(0, lambda: self._set_card(self.java_card, f"Java: OK - {java_desc}", True))
         else:
             hint = get_java_install_hint()
             self.root.after(0, lambda: self._set_card(self.java_card, f"Java: MISSING - {hint}", False))
-        self.java_ok = java_ver is not None and java_ver >= 17
+        self.java_ok = java_ver is not None and java_ver >= 21
 
         sd = self._server_dir()
         jar_map = {"paper": sd / "paper.jar", "vanilla": sd / "server.jar",
@@ -2685,7 +2696,7 @@ class MCServerHost:
             self._auto_backup_world()
 
         if not getattr(self, 'java_ok', False):
-            self._log("Java 17+ not found. Attempting to install Java...", "warn")
+            self._log("Java 21+ not found. Attempting to install Java...", "warn")
             self.root.after(0, lambda: self._set_status("Installing Java...", True))
             install_ok = False
             try:
@@ -2698,8 +2709,8 @@ class MCServerHost:
                 self.root.after(0, lambda: self._set_status("Java install failed", False))
                 return
             ver, info = check_java()
-            if ver is None or ver < 17:
-                self._log(f"Java installed but version {info} is too old. Need 17+.", "error")
+            if ver is None or ver < 21:
+                self._log(f"Java installed but version {info} is too old. Need 21+.", "error")
                 self._log(get_java_install_hint(), "info")
                 self.root.after(0, lambda: self._set_status("Java too old", False))
                 return
