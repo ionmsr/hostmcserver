@@ -1,174 +1,64 @@
 # MCServerHost
 
-A single-file Python application for hosting a Minecraft server on your own machine. Players join instantly through Minecraft Multiplayer. No networking knowledge required.
+A single-file Python GUI for hosting a Minecraft server. Players join instantly through Minecraft Multiplayer. No networking knowledge required.
 
-## Requirements
-
-- Python 3.8 or newer
-- Java 21 or newer (auto-installed on supported systems if missing)
-
-The application will automatically install Python's tkinter library and Java on first run if they are not already present.
+**Requirements:** Python 3.8+ and Java 21+ (both auto-installed if missing).  
+**Platforms:** Linux, Windows, macOS (Intel & Apple Silicon).
 
 ## Quick Start
 
-**Linux / macOS:**
+**Linux / macOS:** `chmod +x run.sh && ./run.sh`  
+**Windows:** Double-click `run.bat`  
+**Manual:** `python3 mcserverhost.py`
 
-```bash
-chmod +x run.sh
-./run.sh
-```
-
-**Windows:**
-
-```
-run.bat
-```
-
-Or run directly:
-
-```bash
-python3 mcserverhost.py
-```
-
-## How It Works
-
-1. The app checks for Python, Java, and tkinter, installing them if needed.
-2. Select your server type and Minecraft version in the Setup tab.
-3. Click "Download / Update Server" to fetch the server files.
-4. Go to the Server tab and click "Start Server".
-5. Your server address appears in the Network tab. Share it with your friends.
+1. Select server type and Minecraft version in Setup.
+2. Click **Download / Update Server**.
+3. Go to Server tab, click **Start Server**.
+4. Share the address from the Network tab.
 
 ## Server Types
 
 | Type | Description |
 |------|-------------|
-| Paper MC | Recommended. High-performance fork of Spigot with plugin support. |
-| Vanilla | Official Mojang server. No modifications. |
-| Fabric | Lightweight mod loader for Minecraft. |
-| Forge | Traditional mod loader with a large mod ecosystem. |
+| Paper MC | Recommended. High-performance, plugin support. |
+| Vanilla | Official Mojang server. |
+| Fabric | Lightweight mod loader. |
+| Forge | Traditional mod loader with large ecosystem. |
 
 ## Connection Modes
 
-### playit.gg (Recommended)
+**playit.gg (Recommended)** — No port forwarding. The app runs a playit.gg tunnel agent. Start the server, click "Claim Agent", add a Minecraft tunnel in the playit.gg dashboard, and share the public address.
 
-No port forwarding required. The app downloads and runs the playit.gg agent, which creates a free tunnel so your server is reachable from anywhere. First-time setup:
-
-1. Start the server with playit.gg mode enabled.
-2. Click "Claim Agent" and log in at playit.gg.
-3. In the playit.gg dashboard, add a Minecraft tunnel pointing to your local server port.
-4. Share the public address shown in the Network tab.
-
-### Direct IP
-
-Requires manual port forwarding on your router. The app can automatically open the server port using UFW (Linux), Windows Defender Firewall, or macOS Application Firewall.
+**Direct IP** — Requires manual port forwarding. The app can auto-configure UFW, iptables, Windows Defender, or macOS Application Firewall.
 
 ## Features
 
-### Server Management
+| Category | Features |
+|----------|----------|
+| **Server Control** | Start/stop/restart, console commands, auto-restart on crash, scheduled restarts, scheduled recurring commands |
+| **Multi-Server** | Manage multiple instances with separate configs, worlds, plugins, and mods |
+| **World Management** | Auto-backup before start, manual backup/restore, periodic backups, backup rotation, world download as ZIP, cloud backup via rclone |
+| **Player Management** | Whitelist/OP lists, player bans/IP bans, online player tracking, player statistics (joins, playtime, last seen) |
+| **Plugin & Mod Manager** | Search Modrinth, one-click install, check for updates on installed plugins/mods |
+| **Chat & Notifications** | Color-coded chat panel, desktop notifications (Linux/macOS/Windows) |
+| **Network** | playit.gg tunnel, direct IP with public IP detection, port accessibility checker |
+| **Configuration** | All server.properties fields, bukkit.yml/spigot.yml/paper-global.yml editors, MOTD editor with color codes, resource pack management, server profiles, quick presets (Survival, Hardcore, Creative, Skyblock, PVP, etc.) |
+| **Performance Dashboard** | Real-time RAM and TPS graphs, uptime/player count cards, customizable widget visibility |
+| **Utilities** | Crash report analyzer, startup script generator, server auto-update, log export with rotation, server migration (tar.gz package/import) |
 
-- Start, stop, and restart the server from the GUI.
-- Send commands directly from the Console tab.
-- View live server output with color-coded log levels.
-- Auto-restart on crash with configurable delay.
-- Scheduled restarts at configurable intervals.
-
-### Multi-Server Support
-
-- Manage multiple server instances from one GUI.
-- Create, switch, and delete server instances.
-- Each instance has its own config, world, plugins, and mods.
-
-### World Management
-
-- Automatic world backup before each server start.
-- Manual backup and restore from the GUI.
-- Periodic backups on a timer (5 to 360 minutes).
-- Backup rotation: automatically delete backups older than N days or keep only the last N backups.
-
-### Player Management
-
-- Dedicated Players tab: whitelist and OP lists with live display.
-- Dedicated Bans tab: player ban and IP ban lists with live display.
-- Online players display updated in real time.
-
-### Plugin & Mod Manager
-
-- Search the Modrinth plugin repository directly from the Plugins tab.
-- One-click plugin installation for Paper and Fabric servers.
-- Mod browser for Fabric and Forge servers — browse and install mods from Modrinth.
-
-### Chat Panel
-
-- Dedicated chat view in the Console tab showing player chat messages.
-- Color-coded: player names in accent color, messages in main color.
-
-### Network and Security
-
-- playit.gg tunnel integration for zero-config public access.
-- Direct IP mode with public IP detection.
-- Automatic firewall configuration (UFW, iptables, Windows Defender, macOS Application Firewall).
-- Port accessibility checker to verify your server is reachable from the internet.
-
-### Configuration
-
-- All server.properties fields editable from the GUI.
-- Config file editors for bukkit.yml, spigot.yml, paper-global.yml, and more.
-- Resource pack management (URL, hash, prompt, require).
-- Server profiles: save, load, and delete configuration presets.
-- Quick presets for common server types (Survival SMP, Hardcore, Creative, Skyblock, PVP, and more).
-
-### Cloud Backup & Migration
-
-- Auto-backup to cloud using rclone (Google Drive, S3, and more).
-- Server migration wizard: package server as .tar.gz for transfer.
-- Import server from .tar.gz archive into a new instance.
-
-### Performance Dashboard
-
-- Real-time Stats tab with RAM usage and TPS graphs.
-- Current RAM, TPS, uptime, and player count cards.
-- TPS color coding: green (>=18), yellow (15-18), red (<15).
-
-### Desktop Notifications
-
-- System notifications on server start/stop and player join/leave.
-- Cross-platform: Linux (notify-send), macOS (osascript), Windows (PowerShell).
-
-### Utilities
-
-- RAM monitoring with live display in the header bar.
-- World download: export world folder as a zip.
-- Server auto-update to the latest build.
-- Startup script generator: export standalone `start.sh` and `start.bat` files.
-- Crash report analyzer: parses Minecraft crash reports and suggests fixes.
-- Log file export to timestamped files with rolling at 10 MB.
-
-## Configuration
-
-All configuration is stored in `~/MCServerHost/config.json`. Server files, world data, backups, and logs are stored in the same directory.
+## File Structure
 
 | Path | Contents |
 |------|----------|
 | `~/MCServerHost/config.json` | Application configuration |
-| `~/MCServerHost/server.properties` | Minecraft server properties |
-| `~/MCServerHost/backups/` | World backup ZIP files |
-| `~/MCServerHost/logs/` | Exported server log files |
-| `~/MCServerHost/profiles/` | Saved server profile presets |
+| `~/MCServerHost/backups/` | World backup ZIPs |
+| `~/MCServerHost/logs/` | Exported server logs |
+| `~/MCServerHost/profiles/` | Saved config presets |
 | `~/MCServerHost/scripts/` | Generated startup scripts |
-| `~/MCServerHost/plugins/` | Installed server plugins |
-| `~/MCServerHost/mods/` | Installed server mods |
+| `~/MCServerHost/plugins/` | Installed plugins |
+| `~/MCServerHost/mods/` | Installed mods |
 | `~/MCServerHost/servers/` | Additional server instances |
-
-## Platform Support
-
-| Platform | Status |
-|----------|--------|
-| Linux (x86_64, ARM64) | Fully supported |
-| Windows (x86_64) | Fully supported |
-| macOS (Intel, Apple Silicon) | Fully supported |
-
-Java 21+ is required. The bootstrap phase will attempt to install it automatically using the system package manager (apt, dnf, yum, pacman, zypper, brew, or winget).
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+MIT License. See [LICENSE](LICENSE).
