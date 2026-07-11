@@ -128,6 +128,35 @@ def _install_java():
     return False
 
 
+# ── Java check (used by bootstrap) ──────────────────────────
+def check_java():
+    try:
+        result = subprocess.run(
+            ["java", "-version"], capture_output=True, text=True, timeout=10
+        )
+        output = result.stderr or result.stdout
+        first_line = output.strip().split("\n")[0] if output.strip() else "Unknown"
+        match = re.search(r'"(\d+)', output)
+        if match:
+            return int(match.group(1)), first_line
+        return None, first_line
+    except FileNotFoundError:
+        return None, "Java not found"
+    except Exception as e:
+        return None, str(e)
+
+
+def get_java_install_hint():
+    system = platform.system()
+    if system == "Linux":
+        return "Install with: sudo apt install openjdk-21-jre (Ubuntu/Debian)"
+    elif system == "Windows":
+        return "Download from https://adoptium.net"
+    elif system == "Darwin":
+        return "Install with: brew install openjdk (Homebrew)"
+    return "Install Java 17+ from https://adoptium.net"
+
+
 def bootstrap():
     print(f"{'=' * 50}")
     print(f"  MCServerHost - Dependency Check")
@@ -203,15 +232,18 @@ PROFILES_DIR = SERVER_DIR / "profiles"
 FABRIC_JAR = SERVER_DIR / "fabric-server.jar"
 FORGE_JAR = SERVER_DIR / "forge-server.jar"
 
-BG_DARK = "#2b2b2b"
-BG_MID = "#353535"
-BG_LIGHT = "#454545"
-FG_MAIN = "#e0e0e0"
-FG_ACCENT = "#6ea8fe"
-FG_GREEN = "#6bc76e"
-FG_RED = "#e06060"
-FG_YELLOW = "#d4a84a"
-FG_DIM = "#808080"
+BG_DARK = "#1a1a2e"
+BG_MID = "#22223a"
+BG_LIGHT = "#2d2d4a"
+BG_HOVER = "#36365a"
+BG_ENTRY = "#16162a"
+FG_MAIN = "#dcdcdc"
+FG_ACCENT = "#7c8cf8"
+FG_GREEN = "#4ade80"
+FG_RED = "#f87171"
+FG_YELLOW = "#fbbf24"
+FG_DIM = "#6b7280"
+FG_BRIGHT = "#f0f0f0"
 
 DEFAULT_CONFIG = {
     "server_port": 25565,
@@ -365,34 +397,6 @@ SERVER_PRESETS = {
 
 
 # ── Utility functions ───────────────────────────────────────
-def check_java():
-    try:
-        result = subprocess.run(
-            ["java", "-version"], capture_output=True, text=True, timeout=10
-        )
-        output = result.stderr or result.stdout
-        first_line = output.strip().split("\n")[0] if output.strip() else "Unknown"
-        match = re.search(r'"(\d+)', output)
-        if match:
-            return int(match.group(1)), first_line
-        return None, first_line
-    except FileNotFoundError:
-        return None, "Java not found"
-    except Exception as e:
-        return None, str(e)
-
-
-def get_java_install_hint():
-    system = platform.system()
-    if system == "Linux":
-        return "Install with: sudo apt install openjdk-21-jre (Ubuntu/Debian)"
-    elif system == "Windows":
-        return "Download from https://adoptium.net"
-    elif system == "Darwin":
-        return "Install with: brew install openjdk (Homebrew)"
-    return "Install Java 17+ from https://adoptium.net"
-
-
 def get_latest_paper_version():
     req = urllib.request.Request(PAPER_API, headers={"User-Agent": USER_AGENT})
     try:
@@ -650,8 +654,8 @@ class MCServerHost:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title(f"{APP_NAME} v{VERSION}")
-        self.root.geometry("1020x720")
-        self.root.minsize(860, 600)
+        self.root.geometry("1060x740")
+        self.root.minsize(900, 620)
         self.root.configure(bg=BG_DARK)
 
         self.server_process = None
@@ -676,6 +680,8 @@ class MCServerHost:
         self._setup_styles()
         self._build_ui()
         self.root.after(200, self._initial_checks)
+        self.root.after(300, self._refresh_players)
+        self.root.after(300, self._refresh_bans)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _load_config(self):
@@ -696,59 +702,88 @@ class MCServerHost:
     def _setup_styles(self):
         s = ttk.Style()
         s.theme_use("clam")
-        BG_ACTIVE = "#404040"
 
-        s.configure(".", background=BG_DARK, foreground=FG_MAIN, font=("Segoe UI", 10))
+        FONT_UI = ("Segoe UI", 10)
+        FONT_BOLD = ("Segoe UI", 10, "bold")
+        FONT_HEADER = ("Segoe UI", 16, "bold")
+        FONT_SUB = ("Segoe UI", 11, "bold")
+        FONT_MONO = ("Cascadia Code", 10)
+
+        s.configure(".", background=BG_DARK, foreground=FG_MAIN, font=FONT_UI)
         s.configure("TFrame", background=BG_DARK)
-        s.configure("TLabel", background=BG_DARK, foreground=FG_MAIN)
-        s.configure("Card.TFrame", background=BG_MID)
-        s.configure("Card.TLabel", background=BG_MID, foreground=FG_MAIN)
-        s.configure("Header.TLabel", background=BG_DARK, foreground=FG_MAIN, font=("Segoe UI", 15, "bold"))
-        s.configure("SubHeader.TLabel", background=BG_MID, foreground=FG_MAIN, font=("Segoe UI", 11, "bold"))
-        s.configure("Status.TLabel", background=BG_DARK, foreground=FG_GREEN, font=("Segoe UI", 11))
-        s.configure("Off.TLabel", background=BG_DARK, foreground=FG_RED, font=("Segoe UI", 11))
-        s.configure("Dim.TLabel", background=BG_DARK, foreground=FG_DIM)
-        s.configure("CardDim.TLabel", background=BG_MID, foreground=FG_DIM)
-        s.configure("Ok.TLabel", background=BG_MID, foreground=FG_GREEN)
-        s.configure("Err.TLabel", background=BG_MID, foreground=FG_RED)
-        s.configure("Addr.TLabel", background=BG_MID, foreground=FG_GREEN, font=("Consolas", 13, "bold"))
+        s.configure("TLabel", background=BG_DARK, foreground=FG_MAIN, font=FONT_UI)
+        s.configure("Card.TFrame", background=BG_MID, relief="flat")
+        s.configure("Card.TLabel", background=BG_MID, foreground=FG_MAIN, font=FONT_UI)
+        s.configure("Header.TLabel", background=BG_DARK, foreground=FG_BRIGHT, font=FONT_HEADER)
+        s.configure("SubHeader.TLabel", background=BG_MID, foreground=FG_BRIGHT, font=FONT_SUB)
+        s.configure("Status.TLabel", background=BG_DARK, foreground=FG_GREEN, font=FONT_SUB)
+        s.configure("Off.TLabel", background=BG_DARK, foreground=FG_RED, font=FONT_SUB)
+        s.configure("Dim.TLabel", background=BG_DARK, foreground=FG_DIM, font=FONT_UI)
+        s.configure("CardDim.TLabel", background=BG_MID, foreground=FG_DIM, font=FONT_UI)
+        s.configure("Ok.TLabel", background=BG_MID, foreground=FG_GREEN, font=FONT_UI)
+        s.configure("Err.TLabel", background=BG_MID, foreground=FG_RED, font=FONT_UI)
+        s.configure("Addr.TLabel", background=BG_MID, foreground=FG_GREEN, font=("Cascadia Code", 13, "bold"))
 
-        s.configure("TButton", background=BG_LIGHT, foreground=FG_MAIN, padding=(12, 6),
-                     relief="flat", borderwidth=0)
-        s.map("TButton", background=[("active", BG_ACTIVE), ("pressed", BG_ACTIVE)])
-        s.configure("Green.TButton", background=FG_GREEN, foreground=BG_DARK,
-                     font=("Segoe UI", 10, "bold"), relief="flat", borderwidth=0)
-        s.map("Green.TButton", background=[("active", "#5aad5a"), ("pressed", "#5aad5a")])
-        s.configure("Red.TButton", background=FG_RED, foreground=BG_DARK,
-                     font=("Segoe UI", 10, "bold"), relief="flat", borderwidth=0)
-        s.map("Red.TButton", background=[("active", "#c45050"), ("pressed", "#c45050")])
-        s.configure("Blue.TButton", background=FG_ACCENT, foreground=BG_DARK,
-                     font=("Segoe UI", 10, "bold"), relief="flat", borderwidth=0)
-        s.map("Blue.TButton", background=[("active", "#5a93d6"), ("pressed", "#5a93d6")])
+        s.configure("TButton", background=BG_LIGHT, foreground=FG_MAIN, padding=(14, 7),
+                     font=FONT_UI, relief="flat", borderwidth=0)
+        s.map("TButton", background=[("active", BG_HOVER), ("pressed", BG_HOVER)],
+              foreground=[("active", FG_BRIGHT)])
+        s.configure("Green.TButton", background=FG_GREEN, foreground="#0a0a1a",
+                     font=FONT_BOLD, relief="flat", borderwidth=0, padding=(14, 7))
+        s.map("Green.TButton", background=[("active", "#36c772"), ("pressed", "#36c772")])
+        s.configure("Red.TButton", background=FG_RED, foreground="#0a0a1a",
+                     font=FONT_BOLD, relief="flat", borderwidth=0, padding=(14, 7))
+        s.map("Red.TButton", background=[("active", "#dc5050"), ("pressed", "#dc5050")])
+        s.configure("Blue.TButton", background=FG_ACCENT, foreground="#0a0a1a",
+                     font=FONT_BOLD, relief="flat", borderwidth=0, padding=(14, 7))
+        s.map("Blue.TButton", background=[("active", "#6270e0"), ("pressed", "#6270e0")])
 
-        s.configure("TNotebook", background=BG_DARK, borderwidth=0)
-        s.configure("TNotebook.Tab", background=BG_MID, foreground=FG_DIM, padding=(16, 8),
+        s.configure("TNotebook", background=BG_DARK, borderwidth=0, padding=0)
+        s.configure("TNotebook.Tab", background=BG_MID, foreground=FG_DIM, padding=(18, 9),
+                     font=FONT_UI, borderwidth=0, relief="flat")
+        s.map("TNotebook.Tab",
+              background=[("selected", BG_LIGHT)],
+              foreground=[("selected", FG_BRIGHT)])
+
+        s.configure("TCheckbutton", background=BG_DARK, foreground=FG_MAIN, font=FONT_UI)
+        s.configure("TEntry", fieldbackground=BG_ENTRY, foreground=FG_MAIN, insertcolor=FG_ACCENT,
+                     borderwidth=0, relief="flat", font=FONT_UI, padding=6)
+        s.configure("TSpinbox", fieldbackground=BG_ENTRY, foreground=FG_MAIN, borderwidth=0,
+                     font=FONT_UI, padding=4)
+        s.configure("TCombobox", fieldbackground=BG_ENTRY, foreground=FG_MAIN, borderwidth=0,
+                     font=FONT_UI, padding=4)
+        s.map("TCombobox", fieldbackground=[("readonly", BG_ENTRY)],
+              foreground=[("readonly", FG_MAIN)])
+        s.configure("Horizontal.TProgressbar", background=FG_ACCENT, troughcolor=BG_ENTRY,
                      borderwidth=0, relief="flat")
-        s.map("TNotebook.Tab", background=[("selected", BG_ACTIVE)], foreground=[("selected", FG_MAIN)])
-
-        s.configure("TCheckbutton", background=BG_DARK, foreground=FG_MAIN)
-        s.configure("TEntry", fieldbackground=BG_MID, foreground=FG_MAIN, insertcolor=FG_MAIN,
-                     borderwidth=0, relief="flat")
-        s.configure("TSpinbox", fieldbackground=BG_MID, foreground=FG_MAIN, borderwidth=0)
-        s.configure("TCombobox", fieldbackground=BG_MID, foreground=FG_MAIN, borderwidth=0)
-        s.map("TCombobox", fieldbackground=[("readonly", BG_MID)])
-        s.configure("Horizontal.TProgressbar", background=FG_ACCENT, troughcolor=BG_MID, borderwidth=0)
-        s.configure("TRadiobutton", background=BG_DARK, foreground=FG_MAIN)
+        s.configure("TRadiobutton", background=BG_DARK, foreground=FG_MAIN, font=FONT_UI)
         s.configure("TSeparator", background=BG_LIGHT)
+
+        s.configure("Treeview", background=BG_ENTRY, foreground=FG_MAIN, fieldbackground=BG_ENTRY,
+                     borderwidth=0, relief="flat", font=FONT_UI, rowheight=28)
+        s.configure("Treeview.Heading", background=BG_MID, foreground=FG_BRIGHT, font=FONT_BOLD,
+                     relief="flat", borderwidth=0)
+        s.map("Treeview", background=[("selected", BG_HOVER)], foreground=[("selected", FG_BRIGHT)])
+        s.map("Treeview.Heading", background=[("active", BG_LIGHT)])
+        s.configure("Treeview", indent=12)
+
+        s.configure("Vertical.TScrollbar", background=BG_MID, troughcolor=BG_ENTRY,
+                     borderwidth=0, relief="flat", arrowsize=12)
+        s.map("Vertical.TScrollbar",
+              background=[("active", BG_HOVER), ("pressed", BG_HOVER)])
+        s.configure("Horizontal.TScrollbar", background=BG_MID, troughcolor=BG_ENTRY,
+                     borderwidth=0, relief="flat", arrowsize=12)
+        s.map("Horizontal.TScrollbar",
+              background=[("active", BG_HOVER), ("pressed", BG_HOVER)])
 
     def _build_ui(self):
         main = ttk.Frame(self.root)
-        main.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        main.pack(fill=tk.BOTH, expand=True, padx=14, pady=14)
         hdr = ttk.Frame(main)
-        hdr.pack(fill=tk.X, pady=(0, 8))
+        hdr.pack(fill=tk.X, pady=(0, 10))
         ttk.Label(hdr, text=APP_NAME, style="Header.TLabel").pack(side=tk.LEFT)
         self.res_lbl = ttk.Label(hdr, text="", style="Dim.TLabel")
-        self.res_lbl.pack(side=tk.LEFT, padx=12)
+        self.res_lbl.pack(side=tk.LEFT, padx=14)
         self.status_lbl = ttk.Label(hdr, text="  Offline", style="Off.TLabel")
         self.status_lbl.pack(side=tk.RIGHT, padx=4)
         self.notebook = ttk.Notebook(main)
@@ -757,14 +792,17 @@ class MCServerHost:
         self._build_server_tab()
         self._build_console_tab()
         self._build_plugins_tab()
+        self._build_players_tab()
+        self._build_bans_tab()
         self._build_network_tab()
 
     # ── Setup Tab ───────────────────────────────────────────
     def _build_setup_tab(self):
         tab = ttk.Frame(self.notebook)
         self.notebook.add(tab, text="  Setup  ")
-        frm = ttk.Frame(tab)
-        frm.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+        scroll_inner = self._scrollable_frame(tab)
+        frm = ttk.Frame(scroll_inner)
+        frm.pack(fill=tk.BOTH, expand=True, padx=14, pady=12)
 
         ttk.Label(frm, text="Prerequisites", style="SubHeader.TLabel").pack(anchor="w")
         self.java_card = self._info_card(frm)
@@ -875,8 +913,10 @@ class MCServerHost:
         tab = ttk.Frame(self.notebook)
         self.notebook.add(tab, text="  Server  ")
 
-        top = ttk.Frame(tab)
-        top.pack(fill=tk.X, padx=12, pady=(12, 0))
+        scroll_inner = self._scrollable_frame(tab)
+
+        top = ttk.Frame(scroll_inner)
+        top.pack(fill=tk.X, padx=14, pady=(12, 0))
         ctrl = ttk.Frame(top)
         ctrl.pack(fill=tk.X)
         self.start_btn = ttk.Button(ctrl, text="Start Server", style="Green.TButton", command=self._start_server)
@@ -902,13 +942,13 @@ class MCServerHost:
         self.players_lbl = ttk.Label(players_row, text="None", style="CardDim.TLabel")
         self.players_lbl.pack(side=tk.LEFT, padx=8)
 
-        btn_row = ttk.Frame(tab)
-        btn_row.pack(fill=tk.X, padx=12, pady=(0, 8))
+        btn_row = ttk.Frame(scroll_inner)
+        btn_row.pack(fill=tk.X, padx=14, pady=(0, 10))
         ttk.Button(btn_row, text="Save Config", command=self._save_server_config).pack(side=tk.LEFT)
         ttk.Button(btn_row, text="Accept EULA", command=self._write_eula).pack(side=tk.LEFT, padx=6)
 
-        props = ttk.Frame(tab)
-        props.pack(fill=tk.X, padx=12, pady=(0, 10))
+        props = ttk.Frame(scroll_inner)
+        props.pack(fill=tk.X, padx=14, pady=(0, 10))
         col1 = ttk.Frame(props)
         col1.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 12))
         col2 = ttk.Frame(props)
@@ -944,9 +984,9 @@ class MCServerHost:
         self._cfg_vars["white_list"] = _field(col1, "Whitelist:", "white_list", values=["true", "false"])
         self._cfg_vars["hardcore"] = _field(col2, "Hardcore:", "hardcore", values=["true", "false"])
 
-        ttk.Separator(tab, orient="horizontal").pack(fill=tk.X, padx=12, pady=8)
-        tools = ttk.Frame(tab)
-        tools.pack(fill=tk.X, padx=12, pady=(0, 8))
+        ttk.Separator(scroll_inner, orient="horizontal").pack(fill=tk.X, padx=14, pady=10)
+        tools = ttk.Frame(scroll_inner)
+        tools.pack(fill=tk.X, padx=14, pady=(0, 10))
 
         backup_frame = ttk.Frame(tools)
         backup_frame.pack(fill=tk.X, pady=(0, 8))
@@ -975,21 +1015,7 @@ class MCServerHost:
                     textvariable=self.backup_max_count_var).pack(side=tk.LEFT)
         ttk.Label(rot_row, text=" (0=off)", style="Dim.TLabel").pack(side=tk.LEFT, padx=(2, 0))
 
-        wl_frame = ttk.Frame(tools)
-        wl_frame.pack(fill=tk.X, pady=(0, 8))
-        ttk.Label(wl_frame, text="Whitelist / OP Manager", style="SubHeader.TLabel").pack(anchor="w", pady=(0, 4))
-        wl_row = ttk.Frame(wl_frame)
-        wl_row.pack(fill=tk.X)
-        self.wl_player_var = tk.StringVar()
-        ttk.Entry(wl_row, textvariable=self.wl_player_var, width=20).pack(side=tk.LEFT)
-        ttk.Button(wl_row, text="+ Whitelist", command=self._add_whitelist_player).pack(side=tk.LEFT, padx=4)
-        ttk.Button(wl_row, text="- Whitelist", command=self._remove_whitelist_player).pack(side=tk.LEFT, padx=4)
-        ttk.Label(wl_row, text="  ", style="Dim.TLabel").pack(side=tk.LEFT)
-        ttk.Button(wl_row, text="+ OP", command=self._add_op_player).pack(side=tk.LEFT, padx=4)
-        ttk.Button(wl_row, text="- OP", command=self._remove_op_player).pack(side=tk.LEFT, padx=4)
-        self.wl_status = ttk.Label(wl_row, text="", style="Dim.TLabel")
-        self.wl_status.pack(side=tk.LEFT, padx=8)
-
+        ttk.Separator(tools, orient="horizontal").pack(fill=tk.X, pady=6)
         update_frame = ttk.Frame(tools)
         update_frame.pack(fill=tk.X)
         ttk.Label(update_frame, text="Server Update", style="SubHeader.TLabel").pack(anchor="w", pady=(0, 4))
@@ -1036,35 +1062,13 @@ class MCServerHost:
         self.pbackup_status = ttk.Label(pbackup_row, text="", style="Dim.TLabel")
         self.pbackup_status.pack(side=tk.LEFT, padx=8)
 
-        ttk.Separator(tools, orient="horizontal").pack(fill=tk.X, pady=6)
-        ban_frame = ttk.Frame(tools)
-        ban_frame.pack(fill=tk.X)
-        ttk.Label(ban_frame, text="Ban Manager", style="SubHeader.TLabel").pack(anchor="w", pady=(0, 4))
-        ban_row = ttk.Frame(ban_frame)
-        ban_row.pack(fill=tk.X)
-        self.ban_player_var = tk.StringVar()
-        ttk.Entry(ban_row, textvariable=self.ban_player_var, width=20).pack(side=tk.LEFT)
-        ttk.Button(ban_row, text="Ban Player", style="Red.TButton",
-                   command=self._ban_player).pack(side=tk.LEFT, padx=4)
-        ttk.Button(ban_row, text="Unban Player",
-                   command=self._unban_player).pack(side=tk.LEFT, padx=4)
-        ttk.Label(ban_row, text="  IP:", style="Dim.TLabel").pack(side=tk.LEFT, padx=(8, 2))
-        self.ban_ip_var = tk.StringVar()
-        ttk.Entry(ban_row, textvariable=self.ban_ip_var, width=15).pack(side=tk.LEFT)
-        ttk.Button(ban_row, text="Ban IP",
-                   command=self._ban_ip).pack(side=tk.LEFT, padx=4)
-        ttk.Button(ban_row, text="Unban IP",
-                   command=self._unban_ip).pack(side=tk.LEFT, padx=4)
-        self.ban_status = ttk.Label(ban_row, text="", style="Dim.TLabel")
-        self.ban_status.pack(side=tk.LEFT, padx=8)
-
     # ── Console Tab ──────────────────────────────────────────
     def _build_console_tab(self):
         tab = ttk.Frame(self.notebook)
         self.notebook.add(tab, text="  Console  ")
 
         ctrl = ttk.Frame(tab)
-        ctrl.pack(fill=tk.X, padx=12, pady=(12, 0))
+        ctrl.pack(fill=tk.X, padx=14, pady=(12, 0))
         ttk.Label(ctrl, text="Command:", style="Dim.TLabel").pack(side=tk.LEFT)
         self.cmd_entry = ttk.Entry(ctrl, width=60)
         self.cmd_entry.pack(side=tk.LEFT, padx=(6, 4), fill=tk.X, expand=True)
@@ -1072,10 +1076,12 @@ class MCServerHost:
         ttk.Button(ctrl, text="Send", style="Blue.TButton", command=self._send_command).pack(side=tk.LEFT)
 
         self.console = scrolledtext.ScrolledText(
-            tab, wrap=tk.WORD, bg="#1e1e1e", fg=FG_MAIN, insertbackground=FG_MAIN,
-            font=("Consolas", 10), relief=tk.FLAT, borderwidth=0, state="disabled"
+            tab, wrap=tk.WORD, bg=BG_ENTRY, fg=FG_MAIN, insertbackground=FG_ACCENT,
+            font=("Cascadia Code", 10), relief=tk.FLAT, borderwidth=0, state="disabled",
+            selectbackground=BG_HOVER, selectforeground=FG_BRIGHT,
+            padx=10, pady=6, spacing1=1
         )
-        self.console.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
+        self.console.pack(fill=tk.BOTH, expand=True, padx=14, pady=10)
         self.console.tag_config("info", foreground=FG_MAIN)
         self.console.tag_config("warn", foreground=FG_YELLOW)
         self.console.tag_config("error", foreground=FG_RED)
@@ -1083,7 +1089,7 @@ class MCServerHost:
         self.console.tag_config("cmd", foreground=FG_ACCENT)
 
         clear_row = ttk.Frame(tab)
-        clear_row.pack(fill=tk.X, padx=12, pady=(0, 8))
+        clear_row.pack(fill=tk.X, padx=14, pady=(0, 10))
         ttk.Button(clear_row, text="Clear Console", command=self._clear_console).pack(side=tk.LEFT)
         ttk.Button(clear_row, text="Analyze Crash Reports", command=self._analyze_crash_reports).pack(side=tk.LEFT, padx=8)
         self.log_export_var = tk.BooleanVar(value=self.config.get("log_export", False))
@@ -1102,38 +1108,42 @@ class MCServerHost:
     def _build_plugins_tab(self):
         tab = ttk.Frame(self.notebook)
         self.notebook.add(tab, text="  Plugins  ")
-        frm = ttk.Frame(tab)
-        frm.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+        scroll_inner = self._scrollable_frame(tab)
+        frm = ttk.Frame(scroll_inner)
+        frm.pack(fill=tk.BOTH, expand=True, padx=14, pady=12)
 
         ttk.Label(frm, text="Plugin Manager (Modrinth)", style="SubHeader.TLabel").pack(anchor="w")
         ttk.Label(frm, text="Search and install plugins for Paper/Fabric servers.",
-                  style="Dim.TLabel").pack(anchor="w", pady=(0, 6))
+                  style="Dim.TLabel").pack(anchor="w", pady=(0, 8))
 
         search_row = ttk.Frame(frm)
-        search_row.pack(fill=tk.X, pady=(0, 6))
+        search_row.pack(fill=tk.X, pady=(0, 8))
         self.plugin_search_var = tk.StringVar()
-        ttk.Entry(search_row, textvariable=self.plugin_search_var, width=40).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Entry(search_row, textvariable=self.plugin_search_var, width=40).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(search_row, text="Search", style="Blue.TButton",
                    command=self._search_plugins).pack(side=tk.LEFT)
         self.plugin_search_btn = search_row.winfo_children()[-1]
         self.plugin_status = ttk.Label(search_row, text="", style="Dim.TLabel")
-        self.plugin_status.pack(side=tk.LEFT, padx=8)
+        self.plugin_status.pack(side=tk.LEFT, padx=10)
 
         list_frame = ttk.Frame(frm)
-        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
 
         cols = ("Name", "Downloads", "Description")
         self.plugin_tree = ttk.Treeview(list_frame, columns=cols, show="headings", selectmode="browse")
         self.plugin_tree.heading("Name", text="Name")
         self.plugin_tree.heading("Downloads", text="Downloads")
         self.plugin_tree.heading("Description", text="Description")
-        self.plugin_tree.column("Name", width=180)
-        self.plugin_tree.column("Downloads", width=90)
-        self.plugin_tree.column("Description", width=400)
+        self.plugin_tree.column("Name", width=180, minwidth=120)
+        self.plugin_tree.column("Downloads", width=90, minwidth=70, anchor="e")
+        self.plugin_tree.column("Description", width=400, minwidth=200)
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.plugin_tree.yview)
         self.plugin_tree.configure(yscrollcommand=scrollbar.set)
         self.plugin_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(4, 0))
+
+        self.plugin_tree.tag_configure("odd", background=BG_ENTRY)
+        self.plugin_tree.tag_configure("even", background=BG_MID)
 
         btn_row = ttk.Frame(frm)
         btn_row.pack(fill=tk.X)
@@ -1184,11 +1194,12 @@ class MCServerHost:
         if not hits:
             self.plugin_status.configure(text="No results found")
             return
-        for h in hits:
+        for i, h in enumerate(hits):
             name = h.get("title", "?")
             dl = h.get("downloads", 0)
             desc = (h.get("description") or "")[:80]
-            self.plugin_tree.insert("", "end", values=(name, f"{dl:,}", desc))
+            tag = "even" if i % 2 == 0 else "odd"
+            self.plugin_tree.insert("", "end", values=(name, f"{dl:,}", desc), tags=(tag,))
         self.plugin_status.configure(text=f"{len(hits)} results")
 
     def _install_plugin(self):
@@ -1255,12 +1266,217 @@ class MCServerHost:
         else:
             subprocess.run(["xdg-open", str(plugins_dir)])
 
+    # ── Players Tab (Whitelist / OP) ────────────────────────
+    def _build_players_tab(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="  Players  ")
+        scroll_inner = self._scrollable_frame(tab)
+        frm = ttk.Frame(scroll_inner)
+        frm.pack(fill=tk.BOTH, expand=True, padx=14, pady=12)
+
+        ttk.Label(frm, text="Whitelist & Operator Manager", style="SubHeader.TLabel").pack(anchor="w")
+        ttk.Label(frm, text="Manage whitelisted players and server operators.",
+                  style="Dim.TLabel").pack(anchor="w", pady=(0, 8))
+
+        add_row = ttk.Frame(frm)
+        add_row.pack(fill=tk.X, pady=(0, 8))
+        self.wl_player_var = tk.StringVar()
+        ttk.Entry(add_row, textvariable=self.wl_player_var, width=22).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(add_row, text="+ Whitelist", command=self._add_whitelist_player).pack(side=tk.LEFT, padx=3)
+        ttk.Button(add_row, text="- Whitelist", command=self._remove_whitelist_player).pack(side=tk.LEFT, padx=3)
+        ttk.Separator(add_row, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=10)
+        ttk.Button(add_row, text="+ OP", command=self._add_op_player).pack(side=tk.LEFT, padx=3)
+        ttk.Button(add_row, text="- OP", command=self._remove_op_player).pack(side=tk.LEFT, padx=3)
+        self.wl_status = ttk.Label(add_row, text="", style="Dim.TLabel")
+        self.wl_status.pack(side=tk.LEFT, padx=10)
+
+        lists = ttk.Frame(frm)
+        lists.pack(fill=tk.BOTH, expand=True)
+
+        wl_frame = ttk.Frame(lists)
+        wl_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
+        ttk.Label(wl_frame, text="Whitelisted Players", style="Dim.TLabel",
+                  font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 4))
+        wl_list_frame = ttk.Frame(wl_frame)
+        wl_list_frame.pack(fill=tk.BOTH, expand=True)
+        self.wl_tree = ttk.Treeview(wl_list_frame, columns=("Name",), show="headings", selectmode="browse")
+        self.wl_tree.heading("Name", text="Player Name")
+        self.wl_tree.column("Name", width=200)
+        wl_scroll = ttk.Scrollbar(wl_list_frame, orient="vertical", command=self.wl_tree.yview)
+        self.wl_tree.configure(yscrollcommand=wl_scroll.set)
+        self.wl_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        wl_scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(4, 0))
+        self.wl_tree.tag_configure("odd", background=BG_ENTRY)
+        self.wl_tree.tag_configure("even", background=BG_MID)
+
+        op_frame = ttk.Frame(lists)
+        op_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(6, 0))
+        ttk.Label(op_frame, text="Operators", style="Dim.TLabel",
+                  font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 4))
+        op_list_frame = ttk.Frame(op_frame)
+        op_list_frame.pack(fill=tk.BOTH, expand=True)
+        self.op_tree = ttk.Treeview(op_list_frame, columns=("Name", "Level"), show="headings", selectmode="browse")
+        self.op_tree.heading("Name", text="Player Name")
+        self.op_tree.heading("Level", text="Level")
+        self.op_tree.column("Name", width=160)
+        self.op_tree.column("Level", width=60, anchor="center")
+        op_scroll = ttk.Scrollbar(op_list_frame, orient="vertical", command=self.op_tree.yview)
+        self.op_tree.configure(yscrollcommand=op_scroll.set)
+        self.op_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        op_scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(4, 0))
+        self.op_tree.tag_configure("odd", background=BG_ENTRY)
+        self.op_tree.tag_configure("even", background=BG_MID)
+
+    def _refresh_players(self):
+        wl_file = SERVER_DIR / "whitelist.json"
+        wl_names = []
+        if wl_file.exists():
+            try:
+                with open(wl_file) as f:
+                    wl_data = json.load(f)
+                wl_names = [e.get("name", "") for e in wl_data if e.get("name")]
+            except Exception:
+                pass
+        for item in self.wl_tree.get_children():
+            self.wl_tree.delete(item)
+        for i, name in enumerate(wl_names):
+            tag = "even" if i % 2 == 0 else "odd"
+            self.wl_tree.insert("", "end", values=(name,), tags=(tag,))
+
+        ops_file = SERVER_DIR / "ops.json"
+        ops_entries = []
+        if ops_file.exists():
+            try:
+                with open(ops_file) as f:
+                    ops_data = json.load(f)
+                ops_entries = [(e.get("name", ""), e.get("level", 4)) for e in ops_data if e.get("name")]
+            except Exception:
+                pass
+        for item in self.op_tree.get_children():
+            self.op_tree.delete(item)
+        for i, (name, level) in enumerate(ops_entries):
+            tag = "even" if i % 2 == 0 else "odd"
+            self.op_tree.insert("", "end", values=(name, level), tags=(tag,))
+
+    # ── Bans Tab ────────────────────────────────────────────
+    def _build_bans_tab(self):
+        tab = ttk.Frame(self.notebook)
+        self.notebook.add(tab, text="  Bans  ")
+        scroll_inner = self._scrollable_frame(tab)
+        frm = ttk.Frame(scroll_inner)
+        frm.pack(fill=tk.BOTH, expand=True, padx=14, pady=12)
+
+        ttk.Label(frm, text="Ban Manager", style="SubHeader.TLabel").pack(anchor="w")
+        ttk.Label(frm, text="Manage player bans and IP bans.",
+                  style="Dim.TLabel").pack(anchor="w", pady=(0, 8))
+
+        add_row = ttk.Frame(frm)
+        add_row.pack(fill=tk.X, pady=(0, 8))
+        self.ban_player_var = tk.StringVar()
+        ttk.Entry(add_row, textvariable=self.ban_player_var, width=22).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(add_row, text="Ban Player", style="Red.TButton",
+                   command=self._ban_player).pack(side=tk.LEFT, padx=3)
+        ttk.Button(add_row, text="Unban Player",
+                   command=self._unban_player).pack(side=tk.LEFT, padx=3)
+        self.ban_status = ttk.Label(add_row, text="", style="Dim.TLabel")
+        self.ban_status.pack(side=tk.LEFT, padx=10)
+
+        ip_row = ttk.Frame(frm)
+        ip_row.pack(fill=tk.X, pady=(0, 10))
+        self.ban_ip_var = tk.StringVar()
+        ttk.Label(ip_row, text="IP:", style="Dim.TLabel").pack(side=tk.LEFT)
+        ttk.Entry(ip_row, textvariable=self.ban_ip_var, width=18).pack(side=tk.LEFT, padx=(4, 6))
+        ttk.Button(ip_row, text="Ban IP", style="Red.TButton",
+                   command=self._ban_ip).pack(side=tk.LEFT, padx=3)
+        ttk.Button(ip_row, text="Unban IP",
+                   command=self._unban_ip).pack(side=tk.LEFT, padx=3)
+        self.ban_ip_status = ttk.Label(ip_row, text="", style="Dim.TLabel")
+        self.ban_ip_status.pack(side=tk.LEFT, padx=10)
+
+        lists = ttk.Frame(frm)
+        lists.pack(fill=tk.BOTH, expand=True)
+
+        pban_frame = ttk.Frame(lists)
+        pban_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
+        ttk.Label(pban_frame, text="Banned Players", style="Dim.TLabel",
+                  font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 4))
+        pban_list_frame = ttk.Frame(pban_frame)
+        pban_list_frame.pack(fill=tk.BOTH, expand=True)
+        self.pban_tree = ttk.Treeview(pban_list_frame, columns=("Name", "Reason", "Date"),
+                                       show="headings", selectmode="browse")
+        self.pban_tree.heading("Name", text="Player")
+        self.pban_tree.heading("Reason", text="Reason")
+        self.pban_tree.heading("Date", text="Date")
+        self.pban_tree.column("Name", width=140)
+        self.pban_tree.column("Reason", width=180)
+        self.pban_tree.column("Date", width=120)
+        pban_scroll = ttk.Scrollbar(pban_list_frame, orient="vertical", command=self.pban_tree.yview)
+        self.pban_tree.configure(yscrollcommand=pban_scroll.set)
+        self.pban_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        pban_scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(4, 0))
+        self.pban_tree.tag_configure("odd", background=BG_ENTRY)
+        self.pban_tree.tag_configure("even", background=BG_MID)
+
+        iban_frame = ttk.Frame(lists)
+        iban_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(6, 0))
+        ttk.Label(iban_frame, text="Banned IPs", style="Dim.TLabel",
+                  font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 4))
+        iban_list_frame = ttk.Frame(iban_frame)
+        iban_list_frame.pack(fill=tk.BOTH, expand=True)
+        self.iban_tree = ttk.Treeview(iban_list_frame, columns=("IP", "Reason", "Date"),
+                                       show="headings", selectmode="browse")
+        self.iban_tree.heading("IP", text="IP Address")
+        self.iban_tree.heading("Reason", text="Reason")
+        self.iban_tree.heading("Date", text="Date")
+        self.iban_tree.column("IP", width=140)
+        self.iban_tree.column("Reason", width=180)
+        self.iban_tree.column("Date", width=120)
+        iban_scroll = ttk.Scrollbar(iban_list_frame, orient="vertical", command=self.iban_tree.yview)
+        self.iban_tree.configure(yscrollcommand=iban_scroll.set)
+        self.iban_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        iban_scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(4, 0))
+        self.iban_tree.tag_configure("odd", background=BG_ENTRY)
+        self.iban_tree.tag_configure("even", background=BG_MID)
+
+    def _refresh_bans(self):
+        bans_file = SERVER_DIR / "bans.json"
+        pban_entries = []
+        if bans_file.exists():
+            try:
+                with open(bans_file) as f:
+                    bans_data = json.load(f)
+                pban_entries = [(e.get("name", ""), e.get("reason", ""), e.get("created", ""))
+                                for e in bans_data if e.get("name")]
+            except Exception:
+                pass
+        for item in self.pban_tree.get_children():
+            self.pban_tree.delete(item)
+        for i, (name, reason, date) in enumerate(pban_entries):
+            tag = "even" if i % 2 == 0 else "odd"
+            self.pban_tree.insert("", "end", values=(name, reason, date), tags=(tag,))
+
+        ibans_file = SERVER_DIR / "ip-bans.json"
+        iban_entries = []
+        if ibans_file.exists():
+            try:
+                with open(ibans_file) as f:
+                    ibans_data = json.load(f)
+                iban_entries = [(e.get("ip", ""), e.get("reason", ""), e.get("created", ""))
+                                for e in ibans_data if e.get("ip")]
+            except Exception:
+                pass
+        for item in self.iban_tree.get_children():
+            self.iban_tree.delete(item)
+        for i, (ip, reason, date) in enumerate(iban_entries):
+            tag = "even" if i % 2 == 0 else "odd"
+            self.iban_tree.insert("", "end", values=(ip, reason, date), tags=(tag,))
+
     # ── Network Tab ─────────────────────────────────────────
     def _build_network_tab(self):
         tab = ttk.Frame(self.notebook)
         self.notebook.add(tab, text="  Network  ")
         frm = ttk.Frame(tab)
-        frm.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+        frm.pack(fill=tk.BOTH, expand=True, padx=14, pady=12)
 
         ttk.Label(frm, text="Connection Mode", style="SubHeader.TLabel").pack(anchor="w")
         self.use_playit_var = tk.BooleanVar(value=self.config.get("use_playit", True))
@@ -1327,10 +1543,44 @@ class MCServerHost:
         self.port_check_status.pack(side=tk.LEFT, padx=8)
 
     # ── Helpers ─────────────────────────────────────────────
+    def _scrollable_frame(self, parent):
+        canvas = tk.Canvas(parent, bg=BG_DARK, highlightthickness=0, bd=0)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        inner = ttk.Frame(canvas)
+        inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor="nw", tags="inner")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        def _on_cfg(e):
+            canvas.itemconfig("inner", width=canvas.winfo_width())
+        canvas.bind("<Configure>", _on_cfg)
+        def _enter(e):
+            def _mw(ev):
+                if sys.platform == "darwin":
+                    canvas.yview_scroll(int(-1 * ev.delta), "units")
+                elif sys.platform == "win32":
+                    canvas.yview_scroll(int(-1 * (ev.delta / 120)), "units")
+                else:
+                    if ev.num == 4:
+                        canvas.yview_scroll(-3, "units")
+                    elif ev.num == 5:
+                        canvas.yview_scroll(3, "units")
+            canvas.bind("<MouseWheel>", _mw)
+            canvas.bind("<Button-4>", _mw)
+            canvas.bind("<Button-5>", _mw)
+        def _leave(e):
+            canvas.unbind("<MouseWheel>")
+            canvas.unbind("<Button-4>")
+            canvas.unbind("<Button-5>")
+        canvas.bind("<Enter>", _enter)
+        canvas.bind("<Leave>", _leave)
+        return inner
+
     def _info_card(self, parent):
-        card = ttk.Frame(parent, style="Card.TFrame")
+        card = ttk.Frame(parent, style="Card.TFrame", padding=2)
         card.lbl = ttk.Label(card, text="Checking...", style="CardDim.TLabel")
-        card.lbl.pack(side=tk.LEFT, padx=12, pady=8)
+        card.lbl.pack(side=tk.LEFT, padx=14, pady=10)
         return card
 
     def _set_card(self, card, text, ok=True):
@@ -2128,6 +2378,7 @@ class MCServerHost:
             json.dump(wl, f, indent=2)
         self.root.after(0, lambda: self.wl_status.configure(text=f"Added {name} to whitelist"))
         self.wl_player_var.set("")
+        self.root.after(0, self._refresh_players)
 
     def _remove_whitelist_player(self):
         name = self.wl_player_var.get().strip()
@@ -2147,6 +2398,7 @@ class MCServerHost:
         except Exception as e:
             self.root.after(0, lambda: self.wl_status.configure(text=f"Error: {e}"))
         self.wl_player_var.set("")
+        self.root.after(0, self._refresh_players)
 
     def _add_op_player(self):
         name = self.wl_player_var.get().strip()
@@ -2168,6 +2420,7 @@ class MCServerHost:
             json.dump(ops, f, indent=2)
         self.root.after(0, lambda: self.wl_status.configure(text=f"Added {name} as operator"))
         self.wl_player_var.set("")
+        self.root.after(0, self._refresh_players)
 
     def _remove_op_player(self):
         name = self.wl_player_var.get().strip()
@@ -2187,6 +2440,7 @@ class MCServerHost:
         except Exception as e:
             self.root.after(0, lambda: self.wl_status.configure(text=f"Error: {e}"))
         self.wl_player_var.set("")
+        self.root.after(0, self._refresh_players)
 
     def _configure_firewall(self):
         port = self.config.get("server_port", 25565)
@@ -2487,6 +2741,7 @@ class MCServerHost:
         self.root.after(0, lambda: self.ban_status.configure(text=f"Banned {name}"))
         self.ban_player_var.set("")
         self._log(f"Player banned: {name}", "warn")
+        self.root.after(0, self._refresh_bans)
 
     def _unban_player(self):
         name = self.ban_player_var.get().strip()
@@ -2511,6 +2766,7 @@ class MCServerHost:
         except Exception as e:
             self.root.after(0, lambda: self.ban_status.configure(text=f"Error: {e}"))
         self.ban_player_var.set("")
+        self.root.after(0, self._refresh_bans)
 
     def _ban_ip(self):
         ip = self.ban_ip_var.get().strip()
@@ -2525,15 +2781,16 @@ class MCServerHost:
             except Exception:
                 bans = []
         if any(e.get("ip", "") == ip for e in bans):
-            self.root.after(0, lambda: self.ban_status.configure(text=f"{ip} already banned"))
+            self.root.after(0, lambda: self.ban_ip_status.configure(text=f"{ip} already banned"))
             return
         bans.append({"ip": ip, "created": time.strftime("%Y-%m-%d %H:%M:%S"),
                       "source": "MCServerHost", "reason": "IP banned via GUI", "expires": "forever"})
         with open(bans_file, "w") as f:
             json.dump(bans, f, indent=2)
-        self.root.after(0, lambda: self.ban_status.configure(text=f"Banned IP {ip}"))
+        self.root.after(0, lambda: self.ban_ip_status.configure(text=f"Banned IP {ip}"))
         self.ban_ip_var.set("")
         self._log(f"IP banned: {ip}", "warn")
+        self.root.after(0, self._refresh_bans)
 
     def _unban_ip(self):
         ip = self.ban_ip_var.get().strip()
@@ -2541,7 +2798,7 @@ class MCServerHost:
             return
         bans_file = SERVER_DIR / "ip-bans.json"
         if not bans_file.exists():
-            self.root.after(0, lambda: self.ban_status.configure(text="No IP bans file"))
+            self.root.after(0, lambda: self.ban_ip_status.configure(text="No IP bans file"))
             return
         try:
             with open(bans_file) as f:
@@ -2551,13 +2808,14 @@ class MCServerHost:
             with open(bans_file, "w") as f:
                 json.dump(bans, f, indent=2)
             if len(bans) < before:
-                self.root.after(0, lambda: self.ban_status.configure(text=f"Unbanned IP {ip}"))
+                self.root.after(0, lambda: self.ban_ip_status.configure(text=f"Unbanned IP {ip}"))
                 self._log(f"IP unbanned: {ip}", "success")
             else:
-                self.root.after(0, lambda: self.ban_status.configure(text=f"{ip} not found in IP bans"))
+                self.root.after(0, lambda: self.ban_ip_status.configure(text=f"{ip} not found in IP bans"))
         except Exception as e:
-            self.root.after(0, lambda: self.ban_status.configure(text=f"Error: {e}"))
+            self.root.after(0, lambda: self.ban_ip_status.configure(text=f"Error: {e}"))
         self.ban_ip_var.set("")
+        self.root.after(0, self._refresh_bans)
 
     # ── Log Export ───────────────────────────────────────────
     def _on_log_export_toggle(self):
