@@ -5,11 +5,23 @@ A single-file Python GUI for hosting a Minecraft server. Players join instantly 
 **Requirements:** Python 3.8+ and Java 21+ (both auto-installed if missing).  
 **Platforms:** Linux, Windows, macOS (Intel & Apple Silicon).
 
-## Quick Start
+## Install
 
-**Linux / macOS:** `chmod +x run.sh && ./run.sh`  
-**Windows:** Double-click `run.bat`  
-**Manual:** `python3 mcserverhost.py`
+**One-liner (Linux/macOS):**
+```bash
+bash <(curl -s https://raw.githubusercontent.com/ionmsr/hostmcserver/main/install.sh)
+```
+
+**Or clone and run manually:**
+```bash
+git clone https://github.com/ionmsr/hostmcserver.git
+cd hostmcserver
+chmod +x run.sh && ./run.sh
+```
+
+**Windows:** Download and double-click `install.bat`, or run `run.bat` directly.
+
+## How It Works
 
 1. Select server type and Minecraft version in Setup.
 2. Click **Download / Update Server**.
