@@ -261,7 +261,7 @@ import tarfile
 
 # ── Constants ───────────────────────────────────────────────
 APP_NAME = "MCServerHost"
-VERSION = "2.1.1"
+VERSION = "2.1.2"
 SERVER_DIR = Path.home() / "MCServerHost"
 PAPER_JAR = SERVER_DIR / "paper.jar"
 VANILLA_JAR = SERVER_DIR / "server.jar"

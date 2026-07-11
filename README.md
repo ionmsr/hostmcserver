@@ -7,19 +7,19 @@ A single-file Python GUI for hosting a Minecraft server. Players join instantly 
 
 ## Install
 
-**One-liner (Linux/macOS):**
+**Linux / macOS one-liner:**
 ```bash
 bash <(curl -s https://raw.githubusercontent.com/ionmsr/hostmcserver/main/install.sh)
 ```
 
-**Or clone and run manually:**
+**Windows:** Download and double-click `install.bat`, or run `run.bat` directly. Java 21 is downloaded and installed automatically from Adoptium (requires admin).
+
+**Or clone manually:**
 ```bash
 git clone https://github.com/ionmsr/hostmcserver.git
 cd hostmcserver
 chmod +x run.sh && ./run.sh
 ```
-
-**Windows:** Download and double-click `install.bat`, or run `run.bat` directly.
 
 ## How It Works
 
