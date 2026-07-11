@@ -38,20 +38,32 @@ REM ── Check / Install Java ────────────────
 echo [2/5] Checking Java...
 java -version >nul 2>&1
 if %ERRORLEVEL% neq 0 (
-    echo   Java not found. Attempting to install...
-    where winget >nul 2>&1
+    echo   Java not found. Downloading Java 21 from Adoptium...
+    set "JAVAMSI=%TEMP%\adoptium-jdk21.msi"
+    where curl >nul 2>&1
     if %ERRORLEVEL% equ 0 (
-        winget install EclipseAdoptium.Temurin.21.JRE --accept-source-agreements --accept-package-agreements
+        curl -L -o "%JAVAMSI%" "https://api.adoptium.net/v3/binary/latest/21/ga/windows/x64/jdk/hotspot/normal/eclipse?project=jdk"
     ) else (
-        where choco >nul 2>&1
+        where powershell >nul 2>&1
         if %ERRORLEVEL% equ 0 (
-            choco install temurin21 -y
+            powershell -Command "Invoke-WebRequest -Uri 'https://api.adoptium.net/v3/binary/latest/21/ga/windows/x64/jdk/hotspot/normal/eclipse?project=jdk' -OutFile '%JAVAMSI%'"
         ) else (
-            echo   Cannot auto-install Java.
+            echo   Cannot download Java automatically.
             echo   Download from https://adoptium.net
+            goto :java_done
         )
     )
+    echo   Installing Java 21 (silent)...
+    msiexec /i "%JAVAMSI%" /qn ADDLOCAL=FeatureMain,FeatureEnvironment,FeatureJarFileRunWith,FeatureJavaHome
+    del "%JAVAMSI%" 2>nul
+    java -version >nul 2>&1
+    if %ERRORLEVEL% equ 0 (
+        echo   Java installed successfully.
+    ) else (
+        echo   Java install may require a terminal restart to take effect.
+    )
 )
+:java_done
 java -version 2>&1 | findstr /i "version"
 echo.
 

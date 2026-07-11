@@ -10,6 +10,7 @@ import platform
 import shutil
 import os
 import re
+import urllib.request
 
 
 def _is_root():
@@ -134,8 +135,44 @@ def _install_java():
         print("[bootstrap] Install Java 21+ from https://adoptium.net")
         return False
     elif system == "Windows":
-        print("[bootstrap] Download Java 21+ from https://adoptium.net")
-        return False
+        print("[bootstrap] Attempting to download and install Java 21 from Adoptium...")
+        try:
+            import ctypes
+            is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+        except Exception:
+            is_admin = False
+        if not is_admin:
+            print("[bootstrap] Java install requires admin. Please run as Administrator or install manually.")
+            print("[bootstrap] Download from https://adoptium.net")
+            return False
+        arch = platform.machine().lower()
+        if arch in ("amd64", "x86_64"):
+            jarch = "x64"
+        elif arch in ("arm64", "aarch64"):
+            jarch = "aarch64"
+        else:
+            jarch = "x64"
+        url = f"https://api.adoptium.net/v3/binary/latest/21/ga/windows/{jarch}/jdk/hotspot/normal/eclipse?project=jdk"
+        tmp_msi = os.path.join(os.environ.get("TEMP", "."), "adoptium-jdk21.msi")
+        try:
+            print("[bootstrap] Downloading Java 21 MSI...")
+            urllib.request.urlretrieve(url, tmp_msi)
+            print("[bootstrap] Installing Java 21 (silent)...")
+            r = subprocess.run(["msiexec", "/i", tmp_msi, "/qn", "ADDLOCAL=FeatureMain,FeatureEnvironment,FeatureJarFileRunWith,FeatureJavaHome"],
+                               capture_output=True, timeout=300)
+            try:
+                os.remove(tmp_msi)
+            except Exception:
+                pass
+            if r.returncode == 0:
+                print("[bootstrap] Java 21 installed successfully.")
+                return True
+            print(f"[bootstrap] MSI install returned code {r.returncode}")
+            return False
+        except Exception as e:
+            print(f"[bootstrap] Java install failed: {e}")
+            print("[bootstrap] Download from https://adoptium.net")
+            return False
     return False
 
 
