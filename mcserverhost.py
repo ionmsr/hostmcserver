@@ -701,6 +701,9 @@ class MCServerHost:
         self._perf_player_history = []
         self._perf_start_time = None
         self._perf_stats_id = None
+        self.scheduled_task_timers = []
+        self._player_session_starts = {}
+        self._player_stats_data = {}
 
         self.config = self._load_config()
         self._setup_styles()
@@ -711,6 +714,7 @@ class MCServerHost:
         self.root.after(200, self._initial_checks)
         self.root.after(300, self._refresh_players)
         self.root.after(300, self._refresh_bans)
+        self.root.after(300, self._refresh_task_list)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _get_instance_dir(self, name):
@@ -1322,6 +1326,29 @@ class MCServerHost:
         self._cfg_vars["require_resource_pack"] = _field(rp_col2, "Require Pack:", "require_resource_pack", values=["true", "false"])
 
         ttk.Separator(scroll_inner, orient="horizontal").pack(fill=tk.X, padx=14, pady=10)
+        motd_frame = ttk.Frame(scroll_inner)
+        motd_frame.pack(fill=tk.X, padx=14, pady=(0, 10))
+        ttk.Label(motd_frame, text="MOTD Editor", style="SubHeader.TLabel").pack(anchor="w", pady=(0, 4))
+        ttk.Label(motd_frame, text="Message of the Day shown in the Minecraft server list. Use &-codes for color (e.g. &aGreen, &cRed, &lBold).",
+                  style="Dim.TLabel", wraplength=600).pack(anchor="w", pady=(0, 4))
+        motd_row = ttk.Frame(motd_frame)
+        motd_row.pack(fill=tk.X)
+        self.motd_entry_var = tk.StringVar(value=self.config.get("motd", "A Minecraft Server"))
+        self.motd_entry = ttk.Entry(motd_row, textvariable=self.motd_entry_var, width=50)
+        self.motd_entry.pack(side=tk.LEFT, padx=(0, 8))
+        self.motd_entry_var.trace_add("write", lambda *_: self._update_motd_preview())
+        ttk.Button(motd_row, text="Apply MOTD", style="Green.TButton",
+                   command=self._apply_motd).pack(side=tk.LEFT)
+        self.motd_preview_var = tk.StringVar(value="")
+        ttk.Label(motd_row, textvariable=self.motd_preview_var,
+                  style="CardDim.TLabel", font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT, padx=8)
+        ttk.Label(motd_frame, text="Colors: &0=Black &1=DarkBlue &2=DarkGreen &3=DarkAqua &4=DarkRed &5=DarkPurple "
+                  "&6=Gold &7=Gray &8=DarkGray &9=Blue &a=Green &b=Aqua &c=Red &d=LightPurple &e=Yellow &f=White "
+                  "&l=Bold &n=Underline &o=Italic &r=Reset",
+                  style="Dim.TLabel", wraplength=600).pack(anchor="w", pady=(4, 0))
+        self._update_motd_preview()
+
+        ttk.Separator(scroll_inner, orient="horizontal").pack(fill=tk.X, padx=14, pady=10)
         tools = ttk.Frame(scroll_inner)
         tools.pack(fill=tk.X, padx=14, pady=(0, 10))
 
@@ -1405,6 +1432,45 @@ class MCServerHost:
 
         ttk.Separator(tools, orient="horizontal").pack(fill=tk.X, pady=6)
         self._build_cloud_backup_section(tools)
+
+        ttk.Separator(tools, orient="horizontal").pack(fill=tk.X, pady=6)
+        sched_tasks_frame = ttk.Frame(tools)
+        sched_tasks_frame.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(sched_tasks_frame, text="Scheduled Tasks", style="SubHeader.TLabel").pack(anchor="w", pady=(0, 4))
+        ttk.Label(sched_tasks_frame, text="Schedule recurring commands (e.g. /save-all, /say Hello).",
+                  style="Dim.TLabel").pack(anchor="w", pady=(0, 4))
+
+        task_list_frame = ttk.Frame(sched_tasks_frame)
+        task_list_frame.pack(fill=tk.X, pady=(0, 6))
+        task_cols = ("Command", "Interval", "Enabled")
+        self.task_tree = ttk.Treeview(task_list_frame, columns=task_cols, show="headings", selectmode="browse", height=4)
+        self.task_tree.heading("Command", text="Command")
+        self.task_tree.heading("Interval", text="Interval (min)")
+        self.task_tree.heading("Enabled", text="Enabled")
+        self.task_tree.column("Command", width=250)
+        self.task_tree.column("Interval", width=120, anchor="e")
+        self.task_tree.column("Enabled", width=80, anchor="center")
+        task_scroll = ttk.Scrollbar(task_list_frame, orient="vertical", command=self.task_tree.yview)
+        self.task_tree.configure(yscrollcommand=task_scroll.set)
+        self.task_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        task_scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(4, 0))
+        self.task_tree.tag_configure("odd", background=BG_ENTRY)
+        self.task_tree.tag_configure("even", background=BG_MID)
+
+        task_add_row = ttk.Frame(sched_tasks_frame)
+        task_add_row.pack(fill=tk.X, pady=(0, 4))
+        self.task_cmd_var = tk.StringVar()
+        ttk.Entry(task_add_row, textvariable=self.task_cmd_var, width=30).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(task_add_row, text="every", style="Dim.TLabel").pack(side=tk.LEFT, padx=(4, 2))
+        self.task_interval_var = tk.StringVar(value="30")
+        ttk.Spinbox(task_add_row, from_=1, to=1440, width=5, textvariable=self.task_interval_var).pack(side=tk.LEFT)
+        ttk.Label(task_add_row, text="min", style="Dim.TLabel").pack(side=tk.LEFT, padx=(2, 8))
+        ttk.Button(task_add_row, text="Add Task", style="Green.TButton",
+                   command=self._add_scheduled_task).pack(side=tk.LEFT)
+        ttk.Button(task_add_row, text="Remove Selected",
+                   command=self._remove_scheduled_task).pack(side=tk.LEFT, padx=4)
+        ttk.Button(task_add_row, text="Run Now",
+                   command=self._run_selected_task).pack(side=tk.LEFT, padx=4)
 
         ttk.Separator(tools, orient="horizontal").pack(fill=tk.X, pady=6)
         migrate_frame = ttk.Frame(tools)
@@ -1554,10 +1620,43 @@ class MCServerHost:
                    command=self._install_plugin).pack(side=tk.LEFT)
         ttk.Button(btn_row, text="Open Plugins Folder",
                    command=self._open_plugins_folder).pack(side=tk.LEFT, padx=8)
+        ttk.Button(btn_row, text="Check for Updates", style="Blue.TButton",
+                   command=self._check_plugin_updates).pack(side=tk.LEFT, padx=8)
         self.plugin_install_status = ttk.Label(btn_row, text="", style="Dim.TLabel")
         self.plugin_install_status.pack(side=tk.LEFT, padx=8)
 
         self._plugin_results = []
+
+        ttk.Separator(frm, orient="horizontal").pack(fill=tk.X, pady=6)
+        update_frame = ttk.Frame(frm)
+        update_frame.pack(fill=tk.X)
+        ttk.Label(update_frame, text="Installed Plugins", style="SubHeader.TLabel").pack(anchor="w", pady=(0, 4))
+
+        self.plugin_update_status = ttk.Label(update_frame, text="Click 'Check for Updates' to scan installed plugins",
+                                              style="Dim.TLabel")
+        self.plugin_update_status.pack(anchor="w", pady=(0, 4))
+
+        plugin_update_cols = ("Plugin", "Installed", "Latest", "Status")
+        self.plugin_update_tree = ttk.Treeview(update_frame, columns=plugin_update_cols, show="headings",
+                                               selectmode="browse", height=4)
+        self.plugin_update_tree.heading("Plugin", text="Plugin")
+        self.plugin_update_tree.heading("Installed", text="Installed")
+        self.plugin_update_tree.heading("Latest", text="Latest")
+        self.plugin_update_tree.heading("Status", text="Status")
+        self.plugin_update_tree.column("Plugin", width=180)
+        self.plugin_update_tree.column("Installed", width=100)
+        self.plugin_update_tree.column("Latest", width=100)
+        self.plugin_update_tree.column("Status", width=120)
+        self.plugin_update_tree.tag_configure("up_to_date", foreground=FG_GREEN)
+        self.plugin_update_tree.tag_configure("has_update", foreground=FG_YELLOW)
+        self.plugin_update_tree.tag_configure("error", foreground=FG_RED)
+        self.plugin_update_tree.tag_configure("odd", background=BG_ENTRY)
+        self.plugin_update_tree.tag_configure("even", background=BG_MID)
+
+        plugin_update_scroll = ttk.Scrollbar(update_frame, orient="vertical", command=self.plugin_update_tree.yview)
+        self.plugin_update_tree.configure(yscrollcommand=plugin_update_scroll.set)
+        self.plugin_update_tree.pack(fill=tk.X)
+        plugin_update_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
     def _search_plugins(self):
         query = self.plugin_search_var.get().strip()
@@ -1721,10 +1820,43 @@ class MCServerHost:
                    command=self._install_mod).pack(side=tk.LEFT)
         ttk.Button(btn_row, text="Open Mods Folder",
                    command=self._open_mods_folder).pack(side=tk.LEFT, padx=8)
+        ttk.Button(btn_row, text="Check for Updates", style="Blue.TButton",
+                   command=self._check_mod_updates).pack(side=tk.LEFT, padx=8)
         self.mod_install_status = ttk.Label(btn_row, text="", style="Dim.TLabel")
         self.mod_install_status.pack(side=tk.LEFT, padx=8)
 
         self._mod_results = []
+
+        ttk.Separator(frm, orient="horizontal").pack(fill=tk.X, pady=6)
+        mod_update_frame = ttk.Frame(frm)
+        mod_update_frame.pack(fill=tk.X)
+        ttk.Label(mod_update_frame, text="Installed Mods", style="SubHeader.TLabel").pack(anchor="w", pady=(0, 4))
+
+        self.mod_update_status = ttk.Label(mod_update_frame, text="Click 'Check for Updates' to scan installed mods",
+                                           style="Dim.TLabel")
+        self.mod_update_status.pack(anchor="w", pady=(0, 4))
+
+        mod_update_cols = ("Mod", "Installed", "Latest", "Status")
+        self.mod_update_tree = ttk.Treeview(mod_update_frame, columns=mod_update_cols, show="headings",
+                                            selectmode="browse", height=4)
+        self.mod_update_tree.heading("Mod", text="Mod")
+        self.mod_update_tree.heading("Installed", text="Installed")
+        self.mod_update_tree.heading("Latest", text="Latest")
+        self.mod_update_tree.heading("Status", text="Status")
+        self.mod_update_tree.column("Mod", width=180)
+        self.mod_update_tree.column("Installed", width=100)
+        self.mod_update_tree.column("Latest", width=100)
+        self.mod_update_tree.column("Status", width=120)
+        self.mod_update_tree.tag_configure("up_to_date", foreground=FG_GREEN)
+        self.mod_update_tree.tag_configure("has_update", foreground=FG_YELLOW)
+        self.mod_update_tree.tag_configure("error", foreground=FG_RED)
+        self.mod_update_tree.tag_configure("odd", background=BG_ENTRY)
+        self.mod_update_tree.tag_configure("even", background=BG_MID)
+
+        mod_update_scroll = ttk.Scrollbar(mod_update_frame, orient="vertical", command=self.mod_update_tree.yview)
+        self.mod_update_tree.configure(yscrollcommand=mod_update_scroll.set)
+        self.mod_update_tree.pack(fill=tk.X)
+        mod_update_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
     def _search_mods(self):
         stype = self.config.get("server_type", "paper")
@@ -1902,6 +2034,41 @@ class MCServerHost:
         op_scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(4, 0))
         self.op_tree.tag_configure("odd", background=BG_ENTRY)
         self.op_tree.tag_configure("even", background=BG_MID)
+
+        ttk.Separator(frm, orient="horizontal").pack(fill=tk.X, pady=10)
+        stats_frame = ttk.Frame(frm)
+        stats_frame.pack(fill=tk.X)
+        ttk.Label(stats_frame, text="Player Statistics", style="SubHeader.TLabel").pack(anchor="w", pady=(0, 4))
+        ttk.Label(stats_frame, text="Tracks join count, playtime, and sessions for each player.",
+                  style="Dim.TLabel").pack(anchor="w", pady=(0, 4))
+        self.player_stats_status = ttk.Label(stats_frame, text="Click 'Refresh Stats' to load data",
+                                             style="Dim.TLabel")
+        self.player_stats_status.pack(anchor="w", pady=(0, 4))
+
+        stats_cols = ("Player", "Joins", "Playtime", "Last Seen")
+        self.player_stats_tree = ttk.Treeview(stats_frame, columns=stats_cols, show="headings",
+                                              selectmode="browse", height=6)
+        self.player_stats_tree.heading("Player", text="Player")
+        self.player_stats_tree.heading("Joins", text="Joins")
+        self.player_stats_tree.heading("Playtime", text="Playtime")
+        self.player_stats_tree.heading("Last Seen", text="Last Seen")
+        self.player_stats_tree.column("Player", width=150)
+        self.player_stats_tree.column("Joins", width=80, anchor="e")
+        self.player_stats_tree.column("Playtime", width=120)
+        self.player_stats_tree.column("Last Seen", width=160)
+        self.player_stats_tree.tag_configure("odd", background=BG_ENTRY)
+        self.player_stats_tree.tag_configure("even", background=BG_MID)
+        stats_scroll = ttk.Scrollbar(stats_frame, orient="vertical", command=self.player_stats_tree.yview)
+        self.player_stats_tree.configure(yscrollcommand=stats_scroll.set)
+        self.player_stats_tree.pack(fill=tk.X)
+        stats_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        stats_btn_row = ttk.Frame(stats_frame)
+        stats_btn_row.pack(fill=tk.X, pady=(4, 0))
+        ttk.Button(stats_btn_row, text="Refresh Stats", command=self._refresh_player_stats).pack(side=tk.LEFT)
+        ttk.Button(stats_btn_row, text="Clear Stats", command=self._clear_player_stats).pack(side=tk.LEFT, padx=8)
+
+        self._load_player_stats()
 
     def _refresh_players(self):
         wl_file = self._server_dir() / "whitelist.json"
@@ -2122,18 +2289,29 @@ class MCServerHost:
     def _build_stats_tab(self):
         tab = ttk.Frame(self.notebook)
         self.notebook.add(tab, text="  Stats  ")
-        frm = ttk.Frame(tab)
+        scroll_inner = self._scrollable_frame(tab)
+        frm = ttk.Frame(scroll_inner)
         frm.pack(fill=tk.BOTH, expand=True, padx=14, pady=12)
 
         ttk.Label(frm, text="Performance Dashboard", style="SubHeader.TLabel").pack(anchor="w")
 
-        cards_row = ttk.Frame(frm)
-        cards_row.pack(fill=tk.X, pady=(8, 10))
+        widget_cfg = ttk.Frame(frm)
+        widget_cfg.pack(fill=tk.X, pady=(4, 8))
+        ttk.Label(widget_cfg, text="Visible widgets:", style="Dim.TLabel").pack(side=tk.LEFT)
+        self._widget_vis = {}
+        for key, label in [("cards", "Stats Cards"), ("ram", "RAM Graph"),
+                           ("tps", "TPS Graph")]:
+            var = tk.BooleanVar(value=self.config.get(f"widget_visible_{key}", True))
+            self._widget_vis[key] = var
+            ttk.Checkbutton(widget_cfg, text=label, variable=var,
+                            command=self._toggle_widget_visibility).pack(side=tk.LEFT, padx=8)
 
+        self._stat_cards_frame = ttk.Frame(frm)
+        self._stat_cards_frame.pack(fill=tk.X, pady=(8, 10))
         self._stat_cards = {}
         for key, label in [("ram", "Current RAM"), ("tps", "Current TPS"),
                            ("uptime", "Uptime"), ("players", "Players"), ("status", "Status")]:
-            card = ttk.Frame(cards_row, style="Card.TFrame")
+            card = ttk.Frame(self._stat_cards_frame, style="Card.TFrame")
             card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
             lbl = ttk.Label(card, text=label, style="CardDim.TLabel",
                             font=("Segoe UI", 9))
@@ -2143,15 +2321,19 @@ class MCServerHost:
             val.pack(anchor="w", padx=10, pady=(0, 8))
             self._stat_cards[key] = val
 
-        ttk.Label(frm, text="RAM Usage Over Time", style="Dim.TLabel",
-                  font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(6, 2))
+        self._ram_label = ttk.Label(frm, text="RAM Usage Over Time", style="Dim.TLabel",
+                                    font=("Segoe UI", 9, "bold"))
+        self._ram_label.pack(anchor="w", pady=(6, 2))
         self._ram_canvas = tk.Canvas(frm, bg=BG_ENTRY, highlightthickness=0, height=160)
         self._ram_canvas.pack(fill=tk.X, pady=(0, 6))
 
-        ttk.Label(frm, text="TPS Over Time", style="Dim.TLabel",
-                  font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(6, 2))
+        self._tps_label = ttk.Label(frm, text="TPS Over Time", style="Dim.TLabel",
+                                    font=("Segoe UI", 9, "bold"))
+        self._tps_label.pack(anchor="w", pady=(6, 2))
         self._tps_canvas = tk.Canvas(frm, bg=BG_ENTRY, highlightthickness=0, height=160)
         self._tps_canvas.pack(fill=tk.X)
+
+        self._toggle_widget_visibility()
 
     def _update_stats_display(self):
         if not self.running:
@@ -2747,6 +2929,8 @@ class MCServerHost:
                 self.root.after(2000, self._start_scheduled_restart_timer)
             if self.periodic_backup_var.get():
                 self.root.after(2000, self._start_periodic_backup_timer)
+            if self._load_scheduled_tasks():
+                self.root.after(2000, self._start_scheduled_tasks_timer)
             if self.use_playit_var.get():
                 self.root.after(2000, self._start_playit)
         except Exception as e:
@@ -2903,6 +3087,16 @@ class MCServerHost:
         except Exception as e:
             self._log(f"Failed to send command: {e}", "error")
 
+    def _send_server_command(self, cmd):
+        if not self.running or not self.server_process:
+            return
+        try:
+            self.server_process.stdin.write(cmd + "\n")
+            self.server_process.stdin.flush()
+            self._log(f"> {cmd}", "cmd")
+        except Exception as e:
+            self._log(f"Failed to send command: {e}", "error")
+
     # ── playit.gg ───────────────────────────────────────────
     def _start_playit(self):
         if not self.playit_ready:
@@ -3042,12 +3236,14 @@ class MCServerHost:
                 self.online_players.add(player)
             self.root.after(0, self._update_players_display)
             self._notify_player_join(player)
+            self._track_player_join(player)
         elif leave_match:
             player = leave_match.group(1)
             with self._players_lock:
                 self.online_players.discard(player)
             self.root.after(0, self._update_players_display)
             self._notify_player_leave(player)
+            self._track_player_leave(player)
         player, message = self._parse_chat_message(line)
         if player is not None:
             self._display_chat(player, message)
@@ -3084,6 +3280,11 @@ class MCServerHost:
                         arcname = os.path.relpath(fp, str(world_dir))
                         zf.write(fp, arcname)
             self._log(f"World backed up to {zip_name.name}", "success")
+            ok, msg = self._verify_backup(zip_name)
+            if ok:
+                self._log(f"Backup verified: {msg}", "success")
+            else:
+                self._log(f"Backup verification FAILED: {msg}", "error")
             self.root.after(0, lambda: self.backup_status.configure(text=f"Last backup: {ts}"))
             self._rotate_backups()
         except Exception as e:
@@ -3442,6 +3643,7 @@ class MCServerHost:
     def _cancel_all_timers(self):
         self._stop_scheduled_restart_timer()
         self._stop_periodic_backup_timer()
+        self._stop_scheduled_tasks_timer()
 
     def _stop_scheduled_restart_timer(self):
         if self.scheduled_restart_timer:
@@ -4354,6 +4556,362 @@ pause
                 self.root.after(0, lambda: self.world_download_status.configure(text="Failed"))
 
         threading.Thread(target=_do, daemon=True).start()
+
+    # ── MOTD Editor ────────────────────────────────────────
+    def _apply_motd(self):
+        motd = self.motd_entry_var.get().strip()
+        self.config["motd"] = motd
+        if "motd" in self._cfg_vars:
+            self._cfg_vars["motd"].set(motd)
+        self._save_server_config()
+        self._update_motd_preview()
+        self._log(f"MOTD updated: {motd}", "success")
+
+    def _update_motd_preview(self):
+        raw = self.motd_entry_var.get()
+        clean = re.sub(r'&[0-9a-fk-or]', '', raw)
+        self.motd_preview_var.set(f"Preview: {clean}")
+
+    # ── Scheduled Tasks ────────────────────────────────────
+    def _load_scheduled_tasks(self):
+        return self.config.get("scheduled_tasks", [])
+
+    def _save_scheduled_tasks(self):
+        self.config["scheduled_tasks"] = self._load_scheduled_tasks()
+        self._save_config()
+
+    def _refresh_task_list(self):
+        for item in self.task_tree.get_children():
+            self.task_tree.delete(item)
+        tasks = self._load_scheduled_tasks()
+        for i, task in enumerate(tasks):
+            tag = "even" if i % 2 == 0 else "odd"
+            enabled = "Yes" if task.get("enabled", True) else "No"
+            self.task_tree.insert("", "end", values=(task.get("command", ""),
+                                  task.get("interval", 30), enabled), tags=(tag,))
+
+    def _add_scheduled_task(self):
+        cmd = self.task_cmd_var.get().strip()
+        if not cmd:
+            return
+        try:
+            interval = int(self.task_interval_var.get())
+        except ValueError:
+            interval = 30
+        tasks = self._load_scheduled_tasks()
+        tasks.append({"command": cmd, "interval": interval, "enabled": True})
+        self.config["scheduled_tasks"] = tasks
+        self._save_config()
+        self._refresh_task_list()
+        self.task_cmd_var.set("")
+        self._log(f"Scheduled task added: {cmd} every {interval}min", "success")
+        if self.running:
+            self._start_scheduled_tasks_timer()
+
+    def _remove_scheduled_task(self):
+        sel = self.task_tree.selection()
+        if not sel:
+            return
+        idx = self.task_tree.index(sel[0])
+        tasks = self._load_scheduled_tasks()
+        if idx < len(tasks):
+            removed = tasks.pop(idx)
+            self.config["scheduled_tasks"] = tasks
+            self._save_config()
+            self._refresh_task_list()
+            self._log(f"Removed scheduled task: {removed.get('command', '')}", "info")
+            if self.running:
+                self._start_scheduled_tasks_timer()
+
+    def _run_selected_task(self):
+        sel = self.task_tree.selection()
+        if not sel:
+            return
+        idx = self.task_tree.index(sel[0])
+        tasks = self._load_scheduled_tasks()
+        if idx < len(tasks):
+            cmd = tasks[idx].get("command", "")
+            if cmd:
+                self._send_server_command(cmd)
+                self._log(f"Ran scheduled task: {cmd}", "info")
+
+    def _start_scheduled_tasks_timer(self):
+        self._stop_scheduled_tasks_timer()
+        if not self.running:
+            return
+        tasks = self._load_scheduled_tasks()
+        for i, task in enumerate(tasks):
+            if not task.get("enabled", True):
+                continue
+            try:
+                interval = int(task.get("interval", 30))
+            except (ValueError, TypeError):
+                interval = 30
+            ms = interval * 60 * 1000
+            timer_id = self.root.after(ms, lambda t=task: self._execute_scheduled_task(t))
+            self.scheduled_task_timers.append(timer_id)
+
+    def _stop_scheduled_tasks_timer(self):
+        for tid in self.scheduled_task_timers:
+            try:
+                self.root.after_cancel(tid)
+            except Exception:
+                pass
+        self.scheduled_task_timers = []
+
+    def _execute_scheduled_task(self, task):
+        if not self.running:
+            return
+        cmd = task.get("command", "")
+        if cmd:
+            self._send_server_command(cmd)
+            self._log(f"Scheduled task executed: {cmd}", "info")
+        interval = task.get("interval", 30) * 60 * 1000
+        tid = self.root.after(interval, lambda: self._execute_scheduled_task(task))
+        self.scheduled_task_timers.append(tid)
+
+    # ── Plugin/Mod Update Checker ──────────────────────────
+    def _check_plugin_updates(self):
+        plugins_dir = self._server_dir() / "plugins"
+        if not plugins_dir.exists():
+            self.plugin_update_status.configure(text="No plugins directory found")
+            return
+        jars = list(plugins_dir.glob("*.jar"))
+        if not jars:
+            self.plugin_update_status.configure(text="No plugins installed")
+            return
+        self.plugin_update_status.configure(text=f"Scanning {len(jars)} plugin(s)...")
+        mc_ver = self.config.get("mc_version", "")
+        stype = self.config.get("server_type", "paper")
+
+        def _do():
+            results = []
+            for jar in jars:
+                name = jar.stem
+                clean_name = re.sub(r'[-_](\d+\.\d+(\.\d+)?).*', '', name)
+                clean_name = re.sub(r'[-_]v?\d+\.\d+.*', '', clean_name)
+                clean_name = clean_name.replace("-", " ").replace("_", " ")
+                try:
+                    facets = [["project_type:plugin"]]
+                    if stype == "paper":
+                        facets.append(["categories:paper"])
+                    facets_str = json.dumps(facets)
+                    url = (f"{MODRINTH_API}/search?facets={urllib.parse.quote(facets_str)}"
+                           f"&query={urllib.parse.quote(clean_name)}&limit=1")
+                    if mc_ver:
+                        url += f"&game_versions={urllib.parse.quote(f'[{json.dumps(mc_ver)}]')}"
+                    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        data = json.loads(resp.read())
+                    hits = data.get("hits", [])
+                    if hits:
+                        h = hits[0]
+                        title = h.get("title", name)
+                        project_id = h.get("project_id") or h.get("slug")
+                        vreq = urllib.request.Request(
+                            f"{MODRINTH_API}/project/{project_id}/version",
+                            headers={"User-Agent": USER_AGENT})
+                        with urllib.request.urlopen(vreq, timeout=10) as vresp:
+                            versions = json.loads(vresp.read())
+                        latest_ver = versions[0].get("version_number", "?") if versions else "?"
+                        results.append((name, "installed", latest_ver, "Update available"))
+                    else:
+                        results.append((name, "installed", "?", "Not found"))
+                except Exception as e:
+                    results.append((name, "installed", "?", f"Error: {str(e)[:30]}"))
+            self.root.after(0, lambda: self._show_plugin_update_results(results))
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _show_plugin_update_results(self, results):
+        for item in self.plugin_update_tree.get_children():
+            self.plugin_update_tree.delete(item)
+        for i, (name, installed, latest, status) in enumerate(results):
+            tag_str = "has_update" if "Update" in status else ("up_to_date" if status == "Not found" else "error")
+            row_tag = "even" if i % 2 == 0 else "odd"
+            self.plugin_update_tree.insert("", "end",
+                                          values=(name[:30], installed, latest, status),
+                                          tags=(row_tag, tag_str))
+        update_count = sum(1 for _, _, _, s in results if "Update" in s)
+        self.plugin_update_status.configure(
+            text=f"Scanned {len(results)} plugin(s), {update_count} update(s) available")
+
+    def _check_mod_updates(self):
+        mods_dir = self._server_dir() / "mods"
+        if not mods_dir.exists():
+            self.mod_update_status.configure(text="No mods directory found")
+            return
+        jars = list(mods_dir.glob("*.jar"))
+        if not jars:
+            self.mod_update_status.configure(text="No mods installed")
+            return
+        self.mod_update_status.configure(text=f"Scanning {len(jars)} mod(s)...")
+        mc_ver = self.config.get("mc_version", "")
+        stype = self.config.get("server_type", "fabric")
+
+        def _do():
+            results = []
+            for jar in jars:
+                name = jar.stem
+                clean_name = re.sub(r'[-_](\d+\.\d+(\.\d+)?).*', '', name)
+                clean_name = re.sub(r'[-_]v?\d+\.\d+.*', '', clean_name)
+                clean_name = clean_name.replace("-", " ").replace("_", " ")
+                try:
+                    facets = [["project_type:mod"]]
+                    if stype == "fabric":
+                        facets.append(["categories:fabric"])
+                    elif stype == "forge":
+                        facets.append(["categories:forge"])
+                    facets_str = json.dumps(facets)
+                    url = (f"{MODRINTH_API}/search?facets={urllib.parse.quote(facets_str)}"
+                           f"&query={urllib.parse.quote(clean_name)}&limit=1")
+                    if mc_ver:
+                        url += f"&game_versions={urllib.parse.quote(f'[{json.dumps(mc_ver)}]')}"
+                    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        data = json.loads(resp.read())
+                    hits = data.get("hits", [])
+                    if hits:
+                        h = hits[0]
+                        project_id = h.get("project_id") or h.get("slug")
+                        vreq = urllib.request.Request(
+                            f"{MODRINTH_API}/project/{project_id}/version",
+                            headers={"User-Agent": USER_AGENT})
+                        with urllib.request.urlopen(vreq, timeout=10) as vresp:
+                            versions = json.loads(vresp.read())
+                        latest_ver = versions[0].get("version_number", "?") if versions else "?"
+                        results.append((name, "installed", latest_ver, "Update available"))
+                    else:
+                        results.append((name, "installed", "?", "Not found"))
+                except Exception as e:
+                    results.append((name, "installed", "?", f"Error: {str(e)[:30]}"))
+            self.root.after(0, lambda: self._show_mod_update_results(results))
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _show_mod_update_results(self, results):
+        for item in self.mod_update_tree.get_children():
+            self.mod_update_tree.delete(item)
+        for i, (name, installed, latest, status) in enumerate(results):
+            tag_str = "has_update" if "Update" in status else ("up_to_date" if status == "Not found" else "error")
+            row_tag = "even" if i % 2 == 0 else "odd"
+            self.mod_update_tree.insert("", "end",
+                                       values=(name[:30], installed, latest, status),
+                                       tags=(row_tag, tag_str))
+        update_count = sum(1 for _, _, _, s in results if "Update" in s)
+        self.mod_update_status.configure(
+            text=f"Scanned {len(results)} mod(s), {update_count} update(s) available")
+
+    # ── Player Statistics ──────────────────────────────────
+    def _player_stats_path(self):
+        return self._server_dir() / "player_stats.json"
+
+    def _load_player_stats(self):
+        path = self._player_stats_path()
+        if path.exists():
+            try:
+                with open(path) as f:
+                    self._player_stats_data = json.load(f)
+            except Exception:
+                self._player_stats_data = {}
+        else:
+            self._player_stats_data = {}
+        self._refresh_player_stats_ui()
+
+    def _save_player_stats(self):
+        path = self._player_stats_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(path, "w") as f:
+                json.dump(self._player_stats_data, f, indent=2)
+        except Exception:
+            pass
+
+    def _track_player_join(self, player):
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        if player not in self._player_stats_data:
+            self._player_stats_data[player] = {"joins": 0, "total_seconds": 0, "last_seen": now}
+        self._player_stats_data[player]["joins"] += 1
+        self._player_stats_data[player]["last_seen"] = now
+        self._player_session_starts[player] = time.time()
+        self._save_player_stats()
+
+    def _track_player_leave(self, player):
+        start = self._player_session_starts.pop(player, None)
+        if start:
+            elapsed = time.time() - start
+            if player not in self._player_stats_data:
+                self._player_stats_data[player] = {"joins": 0, "total_seconds": 0, "last_seen": ""}
+            self._player_stats_data[player]["total_seconds"] += elapsed
+            self._player_stats_data[player]["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            self._save_player_stats()
+
+    def _refresh_player_stats(self):
+        self._load_player_stats()
+
+    def _refresh_player_stats_ui(self):
+        for item in self.player_stats_tree.get_children():
+            self.player_stats_tree.delete(item)
+        sorted_players = sorted(self._player_stats_data.items(),
+                                key=lambda x: x[1].get("last_seen", ""), reverse=True)
+        for i, (player, stats) in enumerate(sorted_players):
+            joins = stats.get("joins", 0)
+            total = stats.get("total_seconds", 0)
+            hours, rem = divmod(int(total), 3600)
+            minutes, _ = divmod(rem, 60)
+            playtime = f"{hours}h {minutes}m"
+            last = stats.get("last_seen", "Unknown")
+            tag = "even" if i % 2 == 0 else "odd"
+            self.player_stats_tree.insert("", "end", values=(player, joins, playtime, last), tags=(tag,))
+        self.player_stats_status.configure(text=f"{len(sorted_players)} player(s) tracked")
+
+    def _clear_player_stats(self):
+        if not messagebox.askyesno("Clear Stats", "Clear all player statistics? This cannot be undone."):
+            return
+        self._player_stats_data = {}
+        self._save_player_stats()
+        self._refresh_player_stats_ui()
+        self._log("Player statistics cleared", "info")
+
+    # ── Backup Verification ────────────────────────────────
+    def _verify_backup(self, zip_path):
+        try:
+            with zipfile.ZipFile(str(zip_path), 'r') as zf:
+                bad = zf.testzip()
+                if bad is not None:
+                    return False, f"Corrupt file: {bad}"
+                count = len(zf.infolist())
+                total_size = sum(info.file_size for info in zf.infolist())
+                return True, f"OK — {count} files, {total_size:,} bytes uncompressed"
+        except zipfile.BadZipFile:
+            return False, "Not a valid ZIP file"
+        except Exception as e:
+            return False, str(e)
+
+    # ── Widget Visibility Toggle ───────────────────────────
+    def _toggle_widget_visibility(self):
+        for key, var in self._widget_vis.items():
+            self.config[f"widget_visible_{key}"] = var.get()
+        self._save_config()
+        cards_vis = self._widget_vis["cards"].get()
+        ram_vis = self._widget_vis["ram"].get()
+        tps_vis = self._widget_vis["tps"].get()
+        if cards_vis:
+            self._stat_cards_frame.pack(fill=tk.X, pady=(8, 10))
+        else:
+            self._stat_cards_frame.pack_forget()
+        if ram_vis:
+            self._ram_label.pack(anchor="w", pady=(6, 2))
+            self._ram_canvas.pack(fill=tk.X, pady=(0, 6))
+        else:
+            self._ram_label.pack_forget()
+            self._ram_canvas.pack_forget()
+        if tps_vis:
+            self._tps_label.pack(anchor="w", pady=(6, 2))
+            self._tps_canvas.pack(fill=tk.X)
+        else:
+            self._tps_label.pack_forget()
+            self._tps_canvas.pack_forget()
 
     def _on_close(self):
         self.stopped_manually = True
