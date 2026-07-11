@@ -2685,8 +2685,27 @@ class MCServerHost:
             self._auto_backup_world()
 
         if not getattr(self, 'java_ok', False):
-            self._log("Java 17+ is required! Please install Java.", "error")
-            return
+            self._log("Java 17+ not found. Attempting to install Java...", "warn")
+            self.root.after(0, lambda: self._set_status("Installing Java...", True))
+            install_ok = False
+            try:
+                install_ok = _install_java()
+            except Exception as ie:
+                self._log(f"Java install failed: {ie}", "error")
+            if not install_ok:
+                self._log("Java installation failed.", "error")
+                self._log(get_java_install_hint(), "info")
+                self.root.after(0, lambda: self._set_status("Java install failed", False))
+                return
+            ver, info = check_java()
+            if ver is None or ver < 17:
+                self._log(f"Java installed but version {info} is too old. Need 17+.", "error")
+                self._log(get_java_install_hint(), "info")
+                self.root.after(0, lambda: self._set_status("Java too old", False))
+                return
+            self.java_ok = True
+            self._log(f"Java installed: {info}", "success")
+            self.root.after(0, lambda: self._set_status("Java ready", False))
 
         xms = self.config.get("ram_min", "1G")
         xmx = self.config.get("ram_max", "2G")
