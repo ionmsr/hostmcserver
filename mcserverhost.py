@@ -59,7 +59,7 @@ def _install_package(name):
     elif pm == "winget":
         return _run(["winget", "install", "--id", name,
                       "--accept-source-agreements", "--accept-package-agreements"])
-    return subprocess.CompletedProcess(cmd=[], returncode=1, stdout="", stderr="no package manager found")
+    return subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="no package manager found")
 
 
 def _try_import_tkinter():
@@ -127,7 +127,7 @@ def _install_java():
                     return True
             return False
     elif system == "Darwin":
-        if command_exists("brew"):
+        if shutil.which("brew"):
             r = _install_package("openjdk")
             if r.returncode == 0:
                 return True
@@ -304,8 +304,11 @@ DEFAULT_CONFIG = {
     "resource_pack_prompt": "",
     "require_resource_pack": False,
     "notifications_enabled": True,
-    "cloud_backup_enabled": False,
     "cloud_backup_remote": "",
+    "scheduled_tasks": [],
+    "widget_visible_cards": True,
+    "widget_visible_ram": True,
+    "widget_visible_tps": True,
 }
 
 SERVER_PRESETS = {
@@ -700,10 +703,10 @@ class MCServerHost:
         self._perf_tps_history = []
         self._perf_player_history = []
         self._perf_start_time = None
-        self._perf_stats_id = None
         self.scheduled_task_timers = []
         self._player_session_starts = {}
         self._player_stats_data = {}
+        self._player_stats_lock = threading.Lock()
 
         self.config = self._load_config()
         self._setup_styles()
@@ -810,6 +813,8 @@ class MCServerHost:
         self._refresh_config_list()
         self._refresh_players()
         self._refresh_bans()
+        self._load_player_stats()
+        self._refresh_task_list()
         self._check_server_installed()
         self._log(f"Switched to instance: {name}", "success")
 
@@ -2441,7 +2446,6 @@ class MCServerHost:
         c.create_text(pad_l + gw // 2, pad_t + gh + 16, text="Time", fill=FG_DIM, font=("Segoe UI", 8))
 
     # ── Helpers ─────────────────────────────────────────────
-    _scroll_canvases = []
 
     def _scrollable_frame(self, parent):
         canvas = tk.Canvas(parent, bg=BG_DARK, highlightthickness=0, bd=0)
@@ -2452,7 +2456,6 @@ class MCServerHost:
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         canvas._is_scroll_canvas = True
-        MCServerHost._scroll_canvases.append(canvas)
 
         def _update_scrollregion(e=None):
             inner.update_idletasks()
@@ -2898,7 +2901,7 @@ class MCServerHost:
                 return
             self.java_ok = True
             self._log(f"Java installed: {info}", "success")
-            self.root.after(0, lambda: self._set_status("Java ready", False))
+            self.root.after(0, lambda: self._set_status("Java ready", True))
 
         xms = self.config.get("ram_min", "1G")
         xmx = self.config.get("ram_max", "2G")
@@ -4576,10 +4579,6 @@ pause
     def _load_scheduled_tasks(self):
         return self.config.get("scheduled_tasks", [])
 
-    def _save_scheduled_tasks(self):
-        self.config["scheduled_tasks"] = self._load_scheduled_tasks()
-        self._save_config()
-
     def _refresh_task_list(self):
         for item in self.task_tree.get_children():
             self.task_tree.delete(item)
@@ -4666,7 +4665,7 @@ pause
         if cmd:
             self._send_server_command(cmd)
             self._log(f"Scheduled task executed: {cmd}", "info")
-        interval = task.get("interval", 30) * 60 * 1000
+        interval = int(task.get("interval", 30)) * 60 * 1000
         tid = self.root.after(interval, lambda: self._execute_scheduled_task(task))
         self.scheduled_task_timers.append(tid)
 
@@ -4829,21 +4828,24 @@ pause
 
     def _track_player_join(self, player):
         now = time.strftime("%Y-%m-%d %H:%M:%S")
-        if player not in self._player_stats_data:
-            self._player_stats_data[player] = {"joins": 0, "total_seconds": 0, "last_seen": now}
-        self._player_stats_data[player]["joins"] += 1
-        self._player_stats_data[player]["last_seen"] = now
-        self._player_session_starts[player] = time.time()
+        with self._player_stats_lock:
+            if player not in self._player_stats_data:
+                self._player_stats_data[player] = {"joins": 0, "total_seconds": 0, "last_seen": now}
+            self._player_stats_data[player]["joins"] += 1
+            self._player_stats_data[player]["last_seen"] = now
+            self._player_session_starts[player] = time.time()
         self._save_player_stats()
 
     def _track_player_leave(self, player):
-        start = self._player_session_starts.pop(player, None)
+        with self._player_stats_lock:
+            start = self._player_session_starts.pop(player, None)
+            if start:
+                elapsed = time.time() - start
+                if player not in self._player_stats_data:
+                    self._player_stats_data[player] = {"joins": 0, "total_seconds": 0, "last_seen": ""}
+                self._player_stats_data[player]["total_seconds"] += elapsed
+                self._player_stats_data[player]["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
         if start:
-            elapsed = time.time() - start
-            if player not in self._player_stats_data:
-                self._player_stats_data[player] = {"joins": 0, "total_seconds": 0, "last_seen": ""}
-            self._player_stats_data[player]["total_seconds"] += elapsed
-            self._player_stats_data[player]["last_seen"] = time.strftime("%Y-%m-%d %H:%M:%S")
             self._save_player_stats()
 
     def _refresh_player_stats(self):
@@ -4852,7 +4854,9 @@ pause
     def _refresh_player_stats_ui(self):
         for item in self.player_stats_tree.get_children():
             self.player_stats_tree.delete(item)
-        sorted_players = sorted(self._player_stats_data.items(),
+        with self._player_stats_lock:
+            snapshot = dict(self._player_stats_data)
+        sorted_players = sorted(snapshot.items(),
                                 key=lambda x: x[1].get("last_seen", ""), reverse=True)
         for i, (player, stats) in enumerate(sorted_players):
             joins = stats.get("joins", 0)
@@ -4868,7 +4872,8 @@ pause
     def _clear_player_stats(self):
         if not messagebox.askyesno("Clear Stats", "Clear all player statistics? This cannot be undone."):
             return
-        self._player_stats_data = {}
+        with self._player_stats_lock:
+            self._player_stats_data = {}
         self._save_player_stats()
         self._refresh_player_stats_ui()
         self._log("Player statistics cleared", "info")
@@ -4893,25 +4898,17 @@ pause
         for key, var in self._widget_vis.items():
             self.config[f"widget_visible_{key}"] = var.get()
         self._save_config()
-        cards_vis = self._widget_vis["cards"].get()
-        ram_vis = self._widget_vis["ram"].get()
-        tps_vis = self._widget_vis["tps"].get()
-        if cards_vis:
-            self._stat_cards_frame.pack(fill=tk.X, pady=(8, 10))
-        else:
-            self._stat_cards_frame.pack_forget()
-        if ram_vis:
-            self._ram_label.pack(anchor="w", pady=(6, 2))
-            self._ram_canvas.pack(fill=tk.X, pady=(0, 6))
-        else:
-            self._ram_label.pack_forget()
-            self._ram_canvas.pack_forget()
-        if tps_vis:
-            self._tps_label.pack(anchor="w", pady=(6, 2))
-            self._tps_canvas.pack(fill=tk.X)
-        else:
-            self._tps_label.pack_forget()
-            self._tps_canvas.pack_forget()
+        parent = self._stat_cards_frame.master
+        for w in parent.winfo_children():
+            w.pack_forget()
+        if self._widget_vis["cards"].get():
+            self._stat_cards_frame.pack(in_=parent, fill=tk.X, pady=(8, 10))
+        if self._widget_vis["ram"].get():
+            self._ram_label.pack(in_=parent, anchor="w", pady=(6, 2))
+            self._ram_canvas.pack(in_=parent, fill=tk.X, pady=(0, 6))
+        if self._widget_vis["tps"].get():
+            self._tps_label.pack(in_=parent, anchor="w", pady=(6, 2))
+            self._tps_canvas.pack(in_=parent, fill=tk.X)
 
     def _on_close(self):
         self.stopped_manually = True
@@ -4929,7 +4926,14 @@ pause
             if not messagebox.askokcancel("Quit", "Server is running. Stop it and quit?"):
                 return
             self._stop_server()
-            time.sleep(1)
+            try:
+                self.server_process.wait(timeout=5)
+            except Exception:
+                try:
+                    self.server_process.kill()
+                    self.server_process.wait(timeout=3)
+                except Exception:
+                    pass
         self._stop_playit()
         self._save_server_config()
         self.root.destroy()
