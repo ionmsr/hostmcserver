@@ -10,7 +10,6 @@ import platform
 import shutil
 import os
 import re
-import urllib.request
 
 
 def _is_root():
@@ -156,7 +155,22 @@ def _install_java():
         tmp_msi = os.path.join(os.environ.get("TEMP", "."), "adoptium-jdk21.msi")
         try:
             print("[bootstrap] Downloading Java 21 MSI...")
-            urllib.request.urlretrieve(url, tmp_msi)
+            curl_ok = shutil.which("curl")
+            if curl_ok:
+                r = subprocess.run(["curl", "-L", "-o", tmp_msi, url],
+                                   capture_output=True, timeout=300)
+                dl_ok = r.returncode == 0 and os.path.exists(tmp_msi) and os.path.getsize(tmp_msi) > 1_000_000
+            else:
+                dl_ok = False
+            if not dl_ok:
+                ps_cmd = f"Invoke-WebRequest -Uri '{url}' -OutFile '{tmp_msi}'"
+                r = subprocess.run(["powershell", "-Command", ps_cmd],
+                                   capture_output=True, timeout=300)
+                dl_ok = r.returncode == 0 and os.path.exists(tmp_msi) and os.path.getsize(tmp_msi) > 1_000_000
+            if not dl_ok:
+                print("[bootstrap] Failed to download Java 21 MSI.")
+                print("[bootstrap] Download from https://adoptium.net")
+                return False
             print("[bootstrap] Installing Java 21 (silent)...")
             r = subprocess.run(["msiexec", "/i", tmp_msi, "/qn", "ADDLOCAL=FeatureMain,FeatureEnvironment,FeatureJarFileRunWith,FeatureJavaHome"],
                                capture_output=True, timeout=300)
@@ -261,7 +275,7 @@ import tarfile
 
 # ── Constants ───────────────────────────────────────────────
 APP_NAME = "MCServerHost"
-VERSION = "2.1.2"
+VERSION = "2.1.3"
 SERVER_DIR = Path.home() / "MCServerHost"
 PAPER_JAR = SERVER_DIR / "paper.jar"
 VANILLA_JAR = SERVER_DIR / "server.jar"
