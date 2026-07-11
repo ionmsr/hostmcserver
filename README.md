@@ -81,8 +81,8 @@ Requires manual port forwarding on your router. The app can automatically open t
 
 ### Player Management
 
-- Whitelist and OP management from the GUI.
-- Player ban and IP ban management.
+- Dedicated Players tab: whitelist and OP lists with live display.
+- Dedicated Bans tab: player ban and IP ban lists with live display.
 - Online players display updated in real time.
 
 ### Plugin Manager

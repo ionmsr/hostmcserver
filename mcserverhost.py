@@ -212,7 +212,7 @@ import hashlib
 
 # ── Constants ───────────────────────────────────────────────
 APP_NAME = "MCServerHost"
-VERSION = "1.0.0"
+VERSION = "1.2.0"
 SERVER_DIR = Path.home() / "MCServerHost"
 PAPER_JAR = SERVER_DIR / "paper.jar"
 VANILLA_JAR = SERVER_DIR / "server.jar"
