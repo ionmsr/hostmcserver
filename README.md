@@ -5,7 +5,7 @@ A single-file Python application for hosting a Minecraft server on your own mach
 ## Requirements
 
 - Python 3.8 or newer
-- Java 17 or newer (auto-installed on supported systems if missing)
+- Java 21 or newer (auto-installed on supported systems if missing)
 
 The application will automatically install Python's tkinter library and Java on first run if they are not already present.
 
@@ -32,7 +32,7 @@ python3 mcserverhost.py
 
 ## How It Works
 
-1. The app checks for Java and tkinter, installing them if needed.
+1. The app checks for Python, Java, and tkinter, installing them if needed.
 2. Select your server type and Minecraft version in the Setup tab.
 3. Click "Download / Update Server" to fetch the server files.
 4. Go to the Server tab and click "Start Server".
@@ -167,7 +167,7 @@ All configuration is stored in `~/MCServerHost/config.json`. Server files, world
 | Windows (x86_64) | Fully supported |
 | macOS (Intel, Apple Silicon) | Fully supported |
 
-Java 17+ is required. The bootstrap phase will attempt to install it automatically using the system package manager (apt, dnf, yum, pacman, zypper, brew, or winget).
+Java 21+ is required. The bootstrap phase will attempt to install it automatically using the system package manager (apt, dnf, yum, pacman, zypper, brew, or winget).
 
 ## License
 
